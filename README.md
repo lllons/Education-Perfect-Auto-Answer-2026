@@ -1,7 +1,7 @@
 
 # EP Answer Assistant
 
-A fast, lightweight Tampermonkey userscript for automatically filling answers on Education Perfect using live vocabulary extraction, fuzzy matching, and cursor-aware typing.
+A fast, lightweight Tampermonkey userscript for automatically filling answers on Education Perfect using live extraction, fuzzy matching, and cursor-aware typing.
 
 ---
 
@@ -20,8 +20,8 @@ A fast, lightweight Tampermonkey userscript for automatically filling answers on
 ## Features
 
 - Auto-types answers directly at the current cursor position
-- Fuzzy vocabulary matching
-- Automatically extracts vocab pairs from EP pages
+- Fuzzy matching
+- Automatically extracts pairs from EP pages
 - Real-time question detection
 - Supports standard inputs and contenteditable fields
 - Angular-safe event dispatching
@@ -85,7 +85,7 @@ Navigate to:
 https://app.educationperfect.com/
 ```
 
-Open a vocab list and click:
+Open a list and click:
 
 ```txt
 Load
@@ -133,7 +133,7 @@ const CFG = {
 
 The script:
 
-1. Extracts vocab pairs from the current page
+1. Extracts pairs from the current page
 2. Normalizes text for reliable matching
 3. Detects active questions in real-time
 4. Finds the closest answer using fuzzy search
@@ -214,13 +214,13 @@ typeCooldown: 0
 | Angular-safe input      | Yes       |
 | Draggable UI            | Yes       |
 | Pause / resume          | Yes       |
-| Live vocab extraction   | Yes       |
+| Live  extraction   | Yes       |
 
 ---
 
 # Known Limitations
 
-* Requires the vocab list to be visible before loading
+* Requires the list to be visible before loading
 * Extremely aggressive speed settings may cause duplicate fills
 * Some custom EP activities may use unsupported input methods
 
