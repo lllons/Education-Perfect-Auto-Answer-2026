@@ -387,10 +387,12 @@
 
   function init() {
     buildPanel();
-    setTimeout(() => {
-      const count = loadAnswers();
-      if (count === 0) showToast('⚠️ Open vocab list first then press Load');
-    }, 1500);
+    if (url.includes('list-starter')) {
+      setTimeout(() => {
+        const count = loadAnswers();
+        if (count === 0) showToast('⚠️ Open vocab list first then press Load');
+      }, 1500);
+    }
     startObserver();
     startPolling();
     updatePanelVisibility();
