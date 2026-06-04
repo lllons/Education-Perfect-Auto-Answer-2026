@@ -291,7 +291,7 @@
           <button class="ep-btn" id="ep-toggle">⏸ Pause</button>
           <button class="ep-btn" id="ep-auto">🤖 Auto</button>
         </div>
-        <div id="ep-hint">Auto-types at your cursor. Press Enter to submit.</div>
+        <div id="ep-hint">Select a task to activate.</div>
         <div id="ep-debug"></div>
       </div>
     `;
