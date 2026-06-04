@@ -1,10 +1,8 @@
-
 # EP Answer Assistant
 
 A fast, lightweight Tampermonkey userscript for automatically filling answers on Education Perfect using live extraction, fuzzy matching, and cursor-aware typing. (FOR EDUCATION PURPOSES ONLY)
 
 ---
-
 <div align="center">
 
 ![Version](https://img.shields.io/badge/version-3.5.0-blue)
@@ -15,6 +13,14 @@ A fast, lightweight Tampermonkey userscript for automatically filling answers on
 
 </div>
 
+
+## Branches
+
+**`main`** — This is the **stable** version. It is reliable, well-tested, and recommended for everyday use.
+
+**`full`** — This is the **AI-powered beta branch**. It uses advanced AI for significantly better question understanding and answer accuracy. The `full` branch is actively updated with the latest improvements and experimental features. While more powerful, it is still in beta and may be less stable than the main branch.
+
+You can switch between the `main` and `full` branches depending on whether you prefer stability or AI 
 ---
 
 ## Features
