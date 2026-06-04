@@ -387,6 +387,7 @@
 
   function init() {
     buildPanel();
+    const url = window.location.href.toLowerCase();
     if (url.includes('list-starter')) {
       setTimeout(() => {
         const count = loadAnswers();
