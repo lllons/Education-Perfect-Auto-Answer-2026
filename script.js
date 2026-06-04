@@ -75,7 +75,8 @@
     return (s || '')
       .toLowerCase()
       .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9\s]/g, '')
+      // Updated regex below to allow math symbols: +, -, *, /, x, =
+      .replace(/[^a-z0-9\s+\-*/x=]/g, '') 
       .replace(/\s+/g, ' ')
       .trim();
   }
