@@ -281,15 +281,15 @@
     panel.id = 'ep-panel';
     panel.innerHTML = `
       <div id="ep-handle">
-        <span id="ep-logo">⚡ EP Assistant</span>
+        <span id="ep-logo">EP Assistant</span>
         <button id="ep-x">✕</button>
       </div>
       <div id="ep-body">
         <div id="ep-count">Not loaded</div>
         <div id="ep-btns">
-          <button class="ep-btn" id="ep-load">🔄 Load</button>
+          <button class="ep-btn" id="ep-load">Load</button>
           <button class="ep-btn" id="ep-toggle">⏸ Pause</button>
-          <button class="ep-btn" id="ep-auto">🤖 Auto</button>
+          <button class="ep-btn" id="ep-auto">Auto (AI)</button>
         </div>
         <div id="ep-hint">Select a task to activate.</div>
         <div id="ep-debug"></div>
