@@ -62,6 +62,8 @@
     }
   });
 
+  const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
   // ── Strip everything after the first semicolon (including the semicolon) ──
   function stripAlts(s) {
     if (!s) return s;
@@ -109,7 +111,20 @@
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+  function fullList() {
+    const full = document.getElementById("full-list-switcher");
+    if (full) full.click();
+    setTimeout(() => {
+      document.querySelector('#slim-scroll-content .preview-grid')?.lastElementChild?.scrollIntoView({ block: 'end' });
+      setTimeout(() => {
+        loadAnswers();
+      }, 1000);
+      document.getElementsByClassName("main-text ng-binding infinity")[0].click();
+    }, 500);
+  }
+
   function loadAnswers() {
+    document.querySelector('#slim-scroll-content .preview-grid')?.lastElementChild?.scrollIntoView({ block: 'end' });
     const map = {};
     let count = 0;
     const targets = [...document.querySelectorAll(SEL.targetLang)];
@@ -133,6 +148,7 @@
     updatePanel(count);
     showToast(count > 0 ? `✅ ${count} pairs loaded` : `⚠️ No vocab found`);
     console.log('[EP] Loaded', count, 'pairs');
+    document.getElementById("start-button-main-label").click();
     return count;
   }
 
@@ -302,7 +318,7 @@
     debugEl   = panel.querySelector('#ep-debug');
     autoBtn   = panel.querySelector('#ep-auto');
 
-    panel.querySelector('#ep-load').addEventListener('click', loadAnswers);
+    panel.querySelector('#ep-load').addEventListener('click', fullList);
     panel.querySelector('#ep-x').addEventListener('click', () => { panel.style.display = 'none'; });
     toggleBtn.addEventListener('click', () => {
       enabled = !enabled;
@@ -390,9 +406,9 @@
     const url = window.location.href.toLowerCase();
     if (url.includes('list-starter')) {
       setTimeout(() => {
-        const count = loadAnswers();
+        const count = fullList();
         if (count === 0) showToast('⚠️ Open vocab list first then press Load');
-      }, 1500);
+      }, 4000);
     }
     startObserver();
     startPolling();
