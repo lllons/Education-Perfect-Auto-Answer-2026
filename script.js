@@ -13,6 +13,14 @@
 (function () {
   'use strict';
 
+  const debug = true;
+  const hints = true;
+
+  const hintsList = {
+    list: "Auto-types at your cursor. Press Enter to submit.",
+    activity: "Auto-selects or type the correct answer using AI.",
+  }
+
   const CFG = {
     fuzzyThreshold : 10,
     typeDelay      : 0.01,
@@ -362,12 +370,19 @@
     const pauseBtn = document.querySelector('#ep-toggle');
     const countEl  = document.querySelector('#ep-count');
     const autoBtn  = document.querySelector('#ep-auto');
+    const hintTxt = document.querySelector('#ep-hint');
+    const debugTxt  = document.querySelector('#ep-debug');
 
     if (loadBtn)  loadBtn.style.display  = vocabUnlocked ? '' : 'none';
     if (pauseBtn) pauseBtn.style.display = vocabUnlocked ? '' : 'none';
     if (countEl)  countEl.style.display  = vocabUnlocked ? '' : 'none';
 
     if (autoBtn) autoBtn.style.display = autoUnlocked ? '' : 'none';
+
+    if (hintTxt) hintTxt.style.display = hints ? '' : 'none';
+    if (vocabUnlocked) hintTxt.innerHTML = hintsList.list;
+    if (autoUnlocked) hintTxt.innerHTML = hintsList.activity;
+    if (debugTxt) debugTxt.style.display = debug ? '' : 'none';
   }
 
   function init() {
