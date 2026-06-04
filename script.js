@@ -400,6 +400,13 @@
     if (vocabUnlocked) hintTxt.innerHTML = hintsList.list;
     if (autoUnlocked) hintTxt.innerHTML = hintsList.activity;
     if (debugTxt) debugTxt.style.display = debug ? '' : 'none';
+    
+    if (url.includes('list-starter')) {
+      setTimeout(() => {
+        const count = fullList();
+        if (count === 0) showToast('⚠️ Open vocab list first then press Load');
+      }, 500);
+    }
   }
 
   function init() {
