@@ -3,12 +3,16 @@
 
 A fast, lightweight Tampermonkey userscript for automatically filling answers on Education Perfect using live extraction, fuzzy matching, and cursor-aware typing. (FOR EDUCATION PURPOSES ONLY)
 
+## Full branch
+This branch adds [MineFlare AI](https://ai.mineflare.app) intergration to answer and automatically complete all tasks on EP (excluding assesments).
+
 ---
 
 <div align="center">
 
 ![Version](https://img.shields.io/badge/version-3.5.0-blue)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey-green)
+![Intergration](https://img.shields.io/badge/intergration-MineFlare_AI-pink)
 ![Language](https://img.shields.io/badge/language-JavaScript-yellow)
 ![Status](https://img.shields.io/badge/status-active-success)
 ![License](https://img.shields.io/badge/license-MIT-purple)
