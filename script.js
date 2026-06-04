@@ -16,7 +16,7 @@
   const CFG = {
     fuzzyThreshold : 10,
     typeDelay      : 0.01,
-    toastDuration  : 10,
+    toastDuration  : 10000,
     pollInterval   : 0,
     cooldown       : 0.5,
     typeCooldown   : 0.1,
@@ -41,6 +41,9 @@
   let activeEditable = null;
   let pageChanging   = false;
   let lastTypeTime   = 0;
+  let panelUnlocked = false;
+  let vocabUnlocked = false;
+  let autoUnlocked = false;
 
   window.addEventListener('beforeunload', () => { pageChanging = true; });
 
@@ -231,7 +234,7 @@
   }
 
   // ── UI ────────────────────────────────────────────────────────────────────
-  let panel, countEl, toggleBtn, debugEl;
+  let panel, countEl, toggleBtn, debugEl, autoBtn;
 
   function setDebug(msg) { if (debugEl) debugEl.textContent = msg; }
 
@@ -278,6 +281,7 @@
         <div id="ep-btns">
           <button class="ep-btn" id="ep-load">🔄 Load</button>
           <button class="ep-btn" id="ep-toggle">⏸ Pause</button>
+          <button class="ep-btn" id="ep-auto">🤖 Auto</button>
         </div>
         <div id="ep-hint">Auto-types at your cursor. Press Enter to submit.</div>
         <div id="ep-debug"></div>
@@ -288,6 +292,7 @@
     countEl   = panel.querySelector('#ep-count');
     toggleBtn = panel.querySelector('#ep-toggle');
     debugEl   = panel.querySelector('#ep-debug');
+    autoBtn   = panel.querySelector('#ep-auto');
 
     panel.querySelector('#ep-load').addEventListener('click', loadAnswers);
     panel.querySelector('#ep-x').addEventListener('click', () => { panel.style.display = 'none'; });
@@ -297,7 +302,12 @@
       toggleBtn.classList.toggle('paused', !enabled);
       showToast(enabled ? '▶ Resumed' : '⏸ Paused');
     });
+    autoBtn.addEventListener('click', () => {
+      showToast('🤖 Auto mode');
+      // Put your auto functionality here
+    });
     makeDraggable(panel, panel.querySelector('#ep-handle'));
+    updatePanelVisibility();
   }
 
   function updatePanel(count) {
@@ -325,6 +335,41 @@
     });
   }
 
+  function updatePanelVisibility() {
+    const url = window.location.href.toLowerCase();
+
+    if (url.includes('list-starter')) {
+      vocabUnlocked = true;
+    }
+
+    if (url.includes('activity-starter')) {
+      autoUnlocked = true;
+    }
+
+    if (vocabUnlocked &&
+        !url.includes('list-starter') &&
+        !url.includes('game')) {
+      vocabUnlocked = false;
+    }
+
+    if (autoUnlocked &&
+        !url.includes('activity-starter') &&
+        !url.includes('game')) {
+      autoUnlocked = false;
+    }
+
+    const loadBtn  = document.querySelector('#ep-load');
+    const pauseBtn = document.querySelector('#ep-toggle');
+    const countEl  = document.querySelector('#ep-count');
+    const autoBtn  = document.querySelector('#ep-auto');
+
+    if (loadBtn)  loadBtn.style.display  = vocabUnlocked ? '' : 'none';
+    if (pauseBtn) pauseBtn.style.display = vocabUnlocked ? '' : 'none';
+    if (countEl)  countEl.style.display  = vocabUnlocked ? '' : 'none';
+
+    if (autoBtn) autoBtn.style.display = autoUnlocked ? '' : 'none';
+  }
+
   function init() {
     buildPanel();
     setTimeout(() => {
@@ -333,6 +378,16 @@
     }, 1500);
     startObserver();
     startPolling();
+    updatePanelVisibility();
+
+    let lastUrl = location.href;
+
+    setInterval(() => {
+      if (location.href !== lastUrl) {
+        lastUrl = location.href;
+        updatePanelVisibility();
+      }
+    }, 500);
     console.log('[EP Assistant v3.6] Ready');
   }
 
