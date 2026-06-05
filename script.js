@@ -34,8 +34,6 @@
     targetLang        : '.targetLanguage.question-label',
     baseLang          : '.baseLanguage.question-label',
     answerInput       : '#answer-text',
-    questionContainer : '.v-group.h-align-center.v-align-center',
-    questionSpan      : 'span[class=""], span:not([class])',
     prompt            : '.prompt.ng-binding',
   };
 
@@ -156,12 +154,10 @@
 
   function getQuestionWord() {
     const JUNK = /^(replay|hint|submit|electronic|voice|translate|from|to|french|english|writing|reading|listening|dictation|speaking|practise|pronunciation|master|advanced|unit|vocab|list|\d+%?)$/i;
-    for (const container of document.querySelectorAll(SEL.questionContainer)) {
-      for (const span of container.querySelectorAll(SEL.questionSpan)) {
-        const text = (span.textContent || '').trim();
-        if (text.length >= 2 && text.length <= 80 && !JUNK.test(text)) return text;
-      }
-    }
+    const span = document.getElementById("question-text");
+    const text = (span.textContent || '').trim();
+    console.log('[EP] Question text:', text);
+    if (text.length >= 2 && text.length <= 80 && !JUNK.test(text)) return text;
     return null;
   }
 
