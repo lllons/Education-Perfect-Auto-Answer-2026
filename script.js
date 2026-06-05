@@ -23,7 +23,7 @@
 
   const CFG = {
     fuzzyThreshold : 10,
-    typeDelay      : 0.01,
+    typeDelay      : 0,
     toastDuration  : 5000,
     pollInterval   : 0,
     cooldown       : 0.5,
