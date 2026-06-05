@@ -49,9 +49,10 @@
   let activeEditable = null;
   let pageChanging   = false;
   let lastTypeTime   = 0;
+  let auto = true;
   let panelUnlocked = false;
   let vocabUnlocked = false;
-  let autoUnlocked = false;
+  let aiUnlocked = false;
 
   window.addEventListener('beforeunload', () => { pageChanging = true; });
 
@@ -259,7 +260,7 @@
   }
 
   // ── UI ────────────────────────────────────────────────────────────────────
-  let panel, countEl, toggleBtn, debugEl, autoBtn;
+  let panel, countEl, toggleBtn, debugEl, autoBtn, aiBtn;
 
   function setDebug(msg) { if (debugEl) debugEl.textContent = msg; }
 
@@ -304,9 +305,10 @@
       <div id="ep-body">
         <div id="ep-count">Not loaded</div>
         <div id="ep-btns">
+          <button class="ep-btn" id="ep-auto">Auto</button>
           <button class="ep-btn" id="ep-load">Load</button>
           <button class="ep-btn" id="ep-toggle">⏸ Pause</button>
-          <button class="ep-btn" id="ep-auto">Auto (AI)</button>
+          <button class="ep-btn" id="ep-ai">AI</button>
         </div>
         <div id="ep-hint">Select a task to activate.</div>
         <div id="ep-debug"></div>
@@ -318,7 +320,14 @@
     toggleBtn = panel.querySelector('#ep-toggle');
     debugEl   = panel.querySelector('#ep-debug');
     autoBtn   = panel.querySelector('#ep-auto');
+    aiBtn     = panel.querySelector('#ep-ai');
 
+    autoBtn.addEventListener('click', () => {
+      showToast('Auto mode');
+      auto = !auto;
+      autoBtn.textContent = auto ? 'Auto' : 'Manual';
+      if (vocabUnlocked && auto) fullList();
+    });
     panel.querySelector('#ep-load').addEventListener('click', fullList);
     panel.querySelector('#ep-x').addEventListener('click', () => { panel.style.display = 'none'; });
     toggleBtn.addEventListener('click', () => {
@@ -327,9 +336,9 @@
       toggleBtn.classList.toggle('paused', !enabled);
       showToast(enabled ? '▶ Resumed' : '⏸ Paused');
     });
-    autoBtn.addEventListener('click', () => {
-      showToast('🤖 Auto mode');
-      // Put your auto functionality here
+    aiBtn.addEventListener('click', () => {
+      showToast('🤖 AI mode');
+      // Put your AI functionality here
     });
     makeDraggable(panel, panel.querySelector('#ep-handle'));
     updatePanelVisibility();
@@ -368,25 +377,27 @@
     }
 
     if (url.includes('activity-starter')) {
-      autoUnlocked = true;
+      aiUnlocked = true;
     }
 
     if (vocabUnlocked &&
         !url.includes('list-starter') &&
         !url.includes('game')) {
       vocabUnlocked = false;
+      answerMap     = {};
+      panel.querySelector('#ep-count').textContent = 'Not loaded';
     }
 
-    if (autoUnlocked &&
+    if (aiUnlocked &&
         !url.includes('activity-starter') &&
         !url.includes('game')) {
-      autoUnlocked = false;
+      aiUnlocked = false;
     }
 
     const loadBtn  = document.querySelector('#ep-load');
     const pauseBtn = document.querySelector('#ep-toggle');
     const countEl  = document.querySelector('#ep-count');
-    const autoBtn  = document.querySelector('#ep-auto');
+    const aiBtn  = document.querySelector('#ep-ai');
     const hintTxt = document.querySelector('#ep-hint');
     const debugTxt  = document.querySelector('#ep-debug');
 
@@ -394,14 +405,14 @@
     if (pauseBtn) pauseBtn.style.display = vocabUnlocked ? '' : 'none';
     if (countEl)  countEl.style.display  = vocabUnlocked ? '' : 'none';
 
-    if (autoBtn) autoBtn.style.display = autoUnlocked ? '' : 'none';
+    if (aiBtn) aiBtn.style.display = aiUnlocked ? '' : 'none';
 
     if (hintTxt) hintTxt.style.display = hints ? '' : 'none';
     if (vocabUnlocked) hintTxt.innerHTML = hintsList.list;
-    if (autoUnlocked) hintTxt.innerHTML = hintsList.activity;
+    if (aiUnlocked) hintTxt.innerHTML = hintsList.activity;
     if (debugTxt) debugTxt.style.display = debug ? '' : 'none';
     
-    if (url.includes('list-starter')) {
+    if (url.includes('list-starter') && auto) {
       setTimeout(() => {
         const count = fullList();
         if (count === 0) showToast('⚠️ Open vocab list first then press Load');
@@ -412,7 +423,7 @@
   function init() {
     buildPanel();
     const url = window.location.href.toLowerCase();
-    if (url.includes('list-starter')) {
+    if (url.includes('list-starter') && auto) {
       setTimeout(() => {
         const count = fullList();
         if (count === 0) showToast('⚠️ Open vocab list first then press Load');
