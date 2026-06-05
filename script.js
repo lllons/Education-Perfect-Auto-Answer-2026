@@ -155,6 +155,7 @@
   function getQuestionWord() {
     const JUNK = /^(replay|hint|submit|electronic|voice|translate|from|to|french|english|writing|reading|listening|dictation|speaking|practise|pronunciation|master|advanced|unit|vocab|list|\d+%?)$/i;
     const span = document.getElementById("question-text");
+    if (!span) return null;
     const text = (span.textContent || '').trim();
     console.log('[EP] Question text:', text);
     if (text.length >= 2 && text.length <= 80 && !JUNK.test(text)) return text;
