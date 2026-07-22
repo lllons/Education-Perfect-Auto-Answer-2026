@@ -415,6 +415,31 @@
         if (count === 0) showToast('⚠️ Open vocab list first then press Load');
       }, 500);
     }
+
+    if (aiUnlocked && auto) {
+      if (url.includes('activity-starter')) {
+        setTimeout(() => {
+          const startBtn = document.getElementById("start-button-school");
+          if (startBtn) startBtn.click();
+        }, 2000);
+      }
+
+      if (url.includes('game')) {
+        setInterval(() => {
+          const bar = document.querySelector('.game-action-bar.sa-action-bar');
+          console.log('[EP] Checking for action bar:', bar);
+          if (bar) {
+            const type = bar.classList[2];
+            console.log('[EP] Detected action type:', type);
+            if (type === 'information') {
+              setTimeout(() => {
+                  document.querySelector("#sa-navigation-controls > div.sa-navigation-controls-content.h-group.v-align-center.h-align-space-between.align-right > div.information-controls.ng-isolate-scope > div > button").click();
+              }, 3500);
+            }
+          }
+        }, 3000);
+      }
+    }
   }
 
   function init() {
