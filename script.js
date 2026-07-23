@@ -8,7 +8,7 @@
 // @match        https://*.educationperfect.com/*
 // @grant        none
 // @run-at       document-idle
-// @licence      MIT
+// @license      MIT
 // ==/UserScript==
 
 (function () {
