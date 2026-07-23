@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         EP Answer Assistant chat - Full version
+// @name         EP Answer Assistant - Full version
 // @namespace    https://educationperfect.com
 // @version      4.0.0
-// @description  Auto-fills answers on Education Perfect with the help of AI.
+// @description  Auto-fills answers on Education Perfect. (Working 2026)
 // @author       lllons and Otjl12
 // @match        https://app.educationperfect.com/*
 // @match        https://*.educationperfect.com/*
