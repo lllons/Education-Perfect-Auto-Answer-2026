@@ -1,3 +1,7 @@
+<div align="center">
+<img src="https://raw.githubusercontent.com/lllons/Education-Perfect-Auto-Answer-2026/main/R.png" width="150">
+</div>
+
 # EP Answer Assistant
 
 A fast, lightweight Tampermonkey userscript for automatically filling answers on Education Perfect using live extraction, fuzzy matching, and cursor-aware typing. (FOR EDUCATION PURPOSES ONLY)
