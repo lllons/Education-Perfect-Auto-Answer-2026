@@ -429,12 +429,12 @@
           const bar = document.querySelector('.game-action-bar.sa-action-bar');
           console.log('[EP] Checking for action bar:', bar);
           if (bar) {
-            const type = bar.classList[2];
-            console.log('[EP] Detected action type:', type);
-            if (type === 'information') {
+            if (bar.classList.contains('information')) {
               setTimeout(() => {
-                  document.querySelector("#sa-navigation-controls > div.sa-navigation-controls-content.h-group.v-align-center.h-align-space-between.align-right > div.information-controls.ng-isolate-scope > div > button").click();
+                document.querySelector("#sa-navigation-controls > div.sa-navigation-controls-content.h-group.v-align-center.h-align-space-between.align-right > div.information-controls.ng-isolate-scope > div > button").click();
               }, 3500);
+            }
+            else if (bar.classList.contains('facts')) {
             }
           }
         }, 3000);
