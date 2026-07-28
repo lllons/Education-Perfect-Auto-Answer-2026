@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🎓 Education Perfect - Auto Answer (2026) 🎓
 // @namespace    https://educationperfect.com
-// @version      4.0.09
+// @version      4.0.091
 // @description  Auto-fills answers on Education Perfect. (Working 2026)
 // @author       lllons and Otjl12
 // @match        https://app.educationperfect.com/*
