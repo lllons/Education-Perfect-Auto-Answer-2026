@@ -1,14 +1,21 @@
 // ==UserScript==
-// @name         EP Answer Assistant - Full version
+// @name         🎓 Education Perfect - Auto Answer (2026) 🎓
 // @namespace    https://educationperfect.com
-// @version      4.0.0
+// @version      4.0.09
 // @description  Auto-fills answers on Education Perfect. (Working 2026)
 // @author       lllons and Otjl12
 // @match        https://app.educationperfect.com/*
 // @match        https://*.educationperfect.com/*
+// @icon         https://raw.githubusercontent.com/lllons/Education-Perfect-Auto-Answer-2026/main/R.png
 // @grant        none
 // @run-at       document-idle
 // @license      MIT
+// @compatible   chrome
+// @compatible   firefox
+// @compatible   edge
+// @compatible   brave
+// @compatible   opera
+// @compatible   safari
 // ==/UserScript==
 
 (function () {
