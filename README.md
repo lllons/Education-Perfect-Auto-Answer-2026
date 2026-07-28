@@ -10,7 +10,7 @@ This branch adds [MineFlare AI](https://ai.mineflare.app) intergration to answer
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/version-3.5.0-blue)
+![Version](https://img.shields.io/badge/version-4.0.92-blue)
 ![Platform](https://img.shields.io/badge/platform-Tampermonkey-green)
 ![Intergration](https://img.shields.io/badge/intergration-MineFlare_AI-pink)
 ![Language](https://img.shields.io/badge/language-JavaScript-yellow)
