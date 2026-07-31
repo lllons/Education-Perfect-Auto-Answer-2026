@@ -21,8 +21,10 @@ A fast userscript for automatically filling answers on Education Perfect using l
 ### Branches
 
 **`main`** — This is the **stable** version. It is reliable, well-tested, and recommended for everyday use. (Not infused with AI right now)
+
 **`Published`** — This is the **GreasyFork** version. It is the script that is hosted on GreasyFork. (Great speed, no AI as of the moment)
-**`full`** — This is the **AI-powered beta branch**. It uses advanced AI for significantly better question understanding and answer accuracy. The `full` branch is actively getting the latest improvements and experimental features. 
+
+**`full`** — This is the **AI-powered beta branch**. It uses advanced AI for significantly better question understanding and answer accuracy. The **full** branch is actively getting the latest improvements and experimental features. 
 
 #### You can switch between the `main` and `full` branches depending on whether you prefer stability or AI 
 ---
