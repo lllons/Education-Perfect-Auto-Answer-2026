@@ -4,7 +4,7 @@
 
 # EP Answer Assistant
 
-A fast, lightweight Tampermonkey userscript for automatically filling answers on Education Perfect using live extraction, fuzzy matching, and cursor-aware typing. (FOR EDUCATION PURPOSES ONLY)
+A fast userscript for automatically filling answers on Education Perfect using live extraction, fuzzy matching, and cursor-aware typing. (FOR EDUCATION PURPOSES ONLY ;) )
 
 ---
 <div align="center">
@@ -18,13 +18,13 @@ A fast, lightweight Tampermonkey userscript for automatically filling answers on
 </div>
 
 
-## Branches
+### Branches
 
-**`main`** — This is the **stable** version. It is reliable, well-tested, and recommended for everyday use.
+**`main`** — This is the **stable** version. It is reliable, well-tested, and recommended for everyday use. (Not infused with AI right now)
+**`Published`** — This is the **GreasyFork** version. It is the script that is hosted on GreasyFork. (Great speed, no AI as of the moment)
+**`full`** — This is the **AI-powered beta branch**. It uses advanced AI for significantly better question understanding and answer accuracy. The `full` branch is actively getting the latest improvements and experimental features. 
 
-**`full`** — This is the **AI-powered beta branch**. It uses advanced AI for significantly better question understanding and answer accuracy. The `full` branch is actively updated with the latest improvements and experimental features. While more powerful, it is still in beta and may be less stable than the main branch.
-
-You can switch between the `main` and `full` branches depending on whether you prefer stability or AI 
+#### You can switch between the `main` and `full` branches depending on whether you prefer stability or AI 
 ---
 
 ## Features
