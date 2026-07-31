@@ -3,7 +3,7 @@
 // @namespace    https://educationperfect.com
 // @version      3.6.0
 // @description  Auto-fills answers on Education Perfect. Strips alternate answers after semicolons.
-// @author       You
+// @author       lllons + Otjl12
 // @match        https://app.educationperfect.com/*
 // @match        https://*.educationperfect.com/*
 // @grant        none
