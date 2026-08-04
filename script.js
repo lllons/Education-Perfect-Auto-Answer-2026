@@ -29,11 +29,11 @@
     activity: "Auto-selects or type the correct answer using AI.",
   }
  
-  const LEARNED_KEY = 'ep.learned';   // localStorage key for learned pairs
-  const TELEMETRY_KEY = 'ep.telemetry'; // localStorage key for telemetry
-  const CONFIDENCE_KEY = 'ep.confidence'; // localStorage key for confidence scores
-  const MAX_LEARNED = 500;            // max learned pairs to keep
-
+  // ── Hunter Mode config (v1: dismiss-only) ──
+  //   - enabled        : master runtime toggle
+  //   - advanceDelay   : ms after verdict before clicking Next
+  //   - errorPolicy    : 'dismiss' (only policy in v1 — Learn policy intentionally deferred)
+  //   - autoStart      : auto-click start buttons on list-starter / activity-starter
   const CFG = {
     fuzzyThreshold : 10,
     typeDelay      : 0,
@@ -41,19 +41,12 @@
     pollInterval   : 0,
     cooldown       : 0.5,
     typeCooldown   : 0.1,
-    // ── Hunter Mode ──
+    // ── Hunter Mode (v1 scope) ──
     hunter: {
       enabled        : false,   // master toggle
       advanceDelay   : 600,     // ms after verdict before clicking Next
-      betweenListDelay: 1500,   // ms pause between lists
-      errorPolicy    : 'hybrid',  // 'dismiss' | 'learn' | 'hybrid' (learn+fallback)
-      autoContinueLists: false,  // walk straight into the next list
-      showProgress   : true,    // show progress badge in panel
-      humanPresenceWindow: 1500,// ms of user typing that suspends Hunter
-      adaptiveThreshold: true,  // self-tune fuzzy threshold
-      adaptiveSpeed: true,      // self-tune typing speed
-      telemetry: false,         // opt-in daily stats
-      trackConfidence: true,    // per-word confidence scores
+      errorPolicy    : 'dismiss', // v1: dismiss wrong-answer overlay and continue
+      autoStart      : true,    // auto-click start-button-main / start-button-school when on a starter page
     },
   };
  
@@ -79,79 +72,21 @@
   let vocabUnlocked = false;
   let aiUnlocked = false;
 
-  // ── Hunter Mode state ──
-  let hunterEnabled = false;       // runtime toggle (defaults to CFG.hunter.enabled)
-  let hunterTimer   = null;        // interval for Hunter loop
-  let hunterState   = 'IDLE';      // IDLE | DETECTED | TYPING | AWAIT_VERDICT | ADVANCE | LIST_DONE
-  let hunterQuestion = '';         // last question word tracked by Hunter
-  let hunterAdvancing = false;     // guard to prevent double-advance
-  let hunterScore = { correct: 0, incorrect: 0, total: 0 }; // session stats
-  let hunterStartTime = 0;          // timestamp when Hunter was started
-  let hunterQuestionStart = 0;      // timestamp when current question was detected
-  let hunterLearned = null;         // {word, answer} from learn policy, or null
-  let hunterNoAdvanceCount = 0;     // consecutive ticks with no advance button
-  let hunterPreviousErrorPolicy = ''; // saved error policy when switching to hybrid
-
-  // ── Human-presence detector state ──
-  let hunterHumanActive = false;    // true when a human is actively typing
-  let hunterHumanTimer = null;      // timer to resume after silence
-  let hunterHumanSuspended = false; // Hunter was suspended due to human presence
-
-  // ── Adaptive threshold state ──
-  let adaptiveScores = [];          // rolling window of similarity scores
-  const ADAPTIVE_WINDOW = 20;       // number of scores to track
-  let adaptiveMinThreshold = 4;     // min clamp for fuzzy threshold
-  let adaptiveMaxThreshold = 12;    // max clamp
-
-  // ── Confidence tracking ──
-  let confidenceMap = {};           // { normKey: { score: number, source: 'grid'|'learned'|'verified', count: number } }
-
-  // ── Telemetry ──
-  let telemetryData = null;         // loaded on start
- 
-  // ── Human-presence detector ──
-  // Watch for real user interaction in the answer field. When detected,
-  // suspend Hunter activity and resume after a silence window.
-  function onHumanInteraction(e) {
-    if (!hunterEnabled) return;
-
-    // Only care about interactions in the answer field
-    const target = e.target;
-    const isAnswerField = target && (
-      target.id === 'answer-text' ||
-      target.closest('#answer-text') ||
-      target.isContentEditable ||
-      target.closest('[contenteditable]') ||
-      target.closest('.lp-question-content') ||
-      target.closest('#answer-block')
-    );
-
-    if (!isAnswerField) return;
-
-    hunterHumanActive = true;
-
-    if (!hunterHumanSuspended && hunterEnabled) {
-      hunterHumanSuspended = true;
-      setDebug('👤 Human typing — Hunter idle');
-      console.log('[Hunter] Human detected — suspending');
-    }
-
-    // Reset the silence timer
-    if (hunterHumanTimer) clearTimeout(hunterHumanTimer);
-    hunterHumanTimer = setTimeout(() => {
-      hunterHumanActive = false;
-      hunterHumanSuspended = false;
-      if (hunterEnabled) {
-        console.log('[Hunter] Human idle — resuming');
-        updateHunterDebug();
-      }
-    }, CFG.hunter.humanPresenceWindow);
-  }
-
-  // Bind human-presence listeners
-  document.addEventListener('keydown', onHumanInteraction, true);
-  document.addEventListener('click', onHumanInteraction, true);
-  document.addEventListener('input', onHumanInteraction, true);
+  // ── Hunter Mode runtime state (v1) ──
+  // State machine: IDLE → DETECTED → AWAIT_VERDICT → ADVANCE → IDLE
+  //
+  //   IDLE          : waiting for a new question to appear
+  //   DETECTED      : question visible, waiting for fill pipeline to finish
+  //   AWAIT_VERDICT : fill done, polling EP DOM for correct/incorrect verdict
+  //   ADVANCE       : verdict seen, clicking "Next question" / dismissing overlay
+  let hunterEnabled    = false;   // runtime toggle (defaults to CFG.hunter.enabled)
+  let hunterTimer      = null;    // interval for hunter tick
+  let hunterState      = 'IDLE';  // current state machine state
+  let hunterQuestion   = '';      // question word currently tracked
+  let hunterAdvancing  = false;   // guard against double-advance clicks
+  let hunterScore      = { correct: 0, incorrect: 0 }; // session stats
+  let hunterStartTime  = 0;       // timestamp when Hunter was started
+  let hunterNoAdvance  = 0;       // consecutive ticks with no advance button found
 
   window.addEventListener('beforeunload', () => {
     pageChanging = true;
@@ -200,8 +135,27 @@
   }
  
   function findAnswer(raw) {
-    // Use confidence-aware version
-    return findAnswerWithConfidence(raw);
+    const q = norm(raw);
+    if (!q) return null;
+
+    // Exact match first
+    if (answerMap[q]) return answerMap[q];
+
+    // Substring match (handles lemmatized forms)
+    for (const [k, v] of Object.entries(answerMap)) {
+      if (k.includes(q) || q.includes(k)) return v;
+    }
+
+    // Fuzzy match
+    let best = 0, bestVal = null;
+    for (const [k, v] of Object.entries(answerMap)) {
+      const sc = similarity(q, k);
+      if (sc >= CFG.fuzzyThreshold && sc > best) {
+        best = sc;
+        bestVal = v;
+      }
+    }
+    return bestVal;
   }
  
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -225,44 +179,31 @@
     const targets = [...document.querySelectorAll(SEL.targetLang)];
     const bases   = [...document.querySelectorAll(SEL.baseLang)];
     const len = Math.min(targets.length, bases.length);
- 
     for (let i = 0; i < len; i++) {
       const rawTarget = (targets[i].textContent || '').trim();
       const rawBase   = (bases[i].textContent   || '').trim();
 
-      // Self-healing: parse semicolons into alternates
-      const targetAlts = parseAlts(rawTarget);
-      const baseAlts   = parseAlts(rawBase);
+      // Strip anything past the first semicolon (alt hint trailers).
+      const t = stripAlts(rawTarget);
+      const b = stripAlts(rawBase);
 
-      // Map each alternate to each other
-      for (const t of targetAlts) {
-        for (const b of baseAlts) {
-          const normT = norm(t);
-          const normB = norm(b);
-          if (normT && normB) {
-            if (!map[normT]) {
-              map[normT] = b;
-              count++;
-            }
-            if (!map[normB]) {
-              map[normB] = t;
-              count++;
-            }
-          }
+      const normT = norm(t);
+      const normB = norm(b);
+      if (normT && normB) {
+        if (!map[normT]) {
+          map[normT] = b;
+          count++;
+        }
+        if (!map[normB]) {
+          map[normB] = t;
+          count++;
         }
       }
     }
- 
+
     answerMap = map;
     lastFilled = '';
     cooldownUntil = 0;
-
-    // Tag loaded pairs with grid confidence
-    if (CFG.hunter.trackConfidence) {
-      for (const key of Object.keys(map)) {
-        updateConfidence(key, 'grid');
-      }
-    }
 
     updatePanel(count);
     showToast(count > 0 ? `✅ ${count} pairs loaded` : `⚠️ No vocab found`);
@@ -375,203 +316,98 @@
     pollTimer = setInterval(() => { tryFill(); }, CFG.pollInterval);
   }
  
-  // ── Hunter Mode ════════════════════════════════════════════════════════════
+  // ── Hunter Mode (v1) ═══════════════════════════════════════════════════════
   //
-  //  Hunter Mode is an autonomous driver that sits on top of the existing
-  //  answer-fill pipeline. Once the current question is answered (correct or
-  //  wrong), it advances to the next one. If the answer was wrong, it dismisses
-  //  the error overlay first.
+  //  v1 scope (per user request — stop here, do NOT add v2/v3 features):
+  //    1. Auto-advance  : detect when current question is finished (correct or
+  //                       wrong) and click the "Next question" button so the
+  //                       script moves to the next question without help.
+  //    2. Dismiss wrong : when the wrong-answer overlay appears, click its
+  //                       dismiss / try-again / continue button so Hunter is
+  //                       never stuck. errorPolicy: 'dismiss'.
+  //    3. Skip whole list: a new "Skip" button on the panel that jumps straight
+  //                       to the next task in the list-starter sidebar.
   //
-  //  State machine: IDLE → DETECTED → TYPING → AWAIT_VERDICT → ADVANCE → IDLE
+  //  NOT in v1 (explicitly out of scope — extend later from the roadmap):
+  //    - Learn-from-error policy (errorPolicy: 'learn'|'hybrid')
+  //    - List hopping / auto-navigate to next list
+  //    - Human-presence detector
+  //    - Adaptive fuzzy threshold / typing speed
+  //    - Confidence tracking
+  //    - Telemetry / Export
+  //
+  //  State machine: IDLE → DETECTED → AWAIT_VERDICT → ADVANCE → IDLE
   //
   // ════════════════════════════════════════════════════════════════════════════
 
   /**
-   * Detect whether the current question has been answered (correct or wrong).
-   * Returns one of:
-   *   'correct'   – correct answer feedback is visible
-   *   'incorrect' – incorrect / wrong-answer feedback is visible
-   *   'unknown'  – question is still pending or no verdict yet
-   *   null       – no question visible at all
+   * Detect the current question's verdict.
+   * Returns: 'correct' | 'incorrect' | 'unknown' | null
    *
-   * Selectors derived from real EP DOM snapshots in Implement/*.html
+   * Selectors derived from real Education Perfect DOM snapshots:
+   *  - Implement/EP (8_4_2026 3：48：05 PM).html
+   *  - Implement/(5) EP (8_4_2026 3：48：24 PM).html
+   *  - Implement/(5) EP (8_4_2026 3：53：53 PM).html
    */
   function detectVerdict() {
-    // 1. Check for modeless-answer-dialog (wrong/correct answer overlay)
-    //    EP shows a modal dialog with #correct-answer-field and #continue-button
+    // 1. The modeless-answer-dialog appears immediately after answering.
+    //    Inside it: tr.correct (green) or tr.incorrect (red).
     const dialog = document.querySelector('.modeless-answer-dialog');
     if (dialog && dialog.offsetParent !== null) {
-      // Check if the dialog shows incorrect (red) or correct (green) answer
       const incorrectRow = dialog.querySelector('tr.incorrect');
-      const correctRow = dialog.querySelector('tr.correct');
+      const correctRow   = dialog.querySelector('tr.correct');
       if (incorrectRow && incorrectRow.offsetParent !== null) return 'incorrect';
-      if (correctRow && correctRow.offsetParent !== null) return 'correct';
+      if (correctRow   && correctRow.offsetParent !== null   ) return 'correct';
     }
 
-    // 2. Check for incorrect / wrong-answer signals (highest priority)
-    //    EP adds class 'incorrect' to history-bar items
-    const incorrectHistory = document.querySelector('.history-item.incorrect');
-    if (incorrectHistory) return 'incorrect';
-
-    // 3. In-game action bar with try-again button means wrong answer
+    // 2. In-game action bar shows try-again when wrong / next when right.
     const tryAgainBtn = document.querySelector('.action-bar-button.try-again button, .action-bar-button.try-again');
     if (tryAgainBtn && tryAgainBtn.offsetParent !== null) return 'incorrect';
 
-    // 4. Check for correct signals
-    //    EP shows a 'correct-popup' or a 'correct-button' on correct answer
-    const correctPopup = document.querySelector('#correct-popup, .correct-popup');
-    if (correctPopup && correctPopup.offsetParent !== null) return 'correct';
-
-    const correctBtn = document.querySelector('#correct-button, .correct-button');
-    if (correctBtn && correctBtn.offsetParent !== null) return 'correct';
-
-    // 5. Cheer button often appears after a correct answer
+    // 3. History bar / cheer-button appears after a correct answer.
     const cheerBtn = document.querySelector('.cheer-button:not(.ng-hide):not(.sf-hidden)');
     if (cheerBtn) return 'correct';
 
-    // 6. Next-question button appearing means the current question is done
+    // 4. Paper-mode-style "Next question" button.
     const nextQBtn = document.querySelector('.next-question-button:not([disabled]), #next-question:not([disabled])');
     if (nextQBtn) return 'correct';
 
-    // 7. If the question text has disappeared or changed, the question is done
-    const questionSpan = document.getElementById('question-text');
-    if (questionSpan) {
-      const text = (questionSpan.textContent || '').trim();
-      if (text.length === 0) return 'unknown';
-    }
+    // 5. SA navigation "information" controls / nav-bar-exit button.
+    const infoBtn = document.querySelector('.information-controls button:not([disabled]), #sa-navigation-controls button:not([disabled])');
+    if (infoBtn && infoBtn.offsetParent !== null) return 'correct';
 
-    return null; // no verdict yet
+    return null; // question still in progress
   }
 
   /**
-   * Click the "Next" / "Continue" / "Try again" / "OK" button to advance
-   * past the current question. Tries multiple selectors from the EP DOM.
-   */
-  /**
-   * Scrape the correct answer from the modeless-answer-dialog overlay.
-   * EP reveals the correct answer in a table row with id="correct-answer-field".
-   * Returns the answer text, or null if not found.
-   */
-  function scrapeCorrectAnswer() {
-    const field = document.getElementById('correct-answer-field');
-    if (field) {
-      const text = (field.textContent || '').trim();
-      if (text && text.length > 0) {
-        console.log('[Hunter] Scraped correct answer:', text);
-        return text;
-      }
-    }
-    // Fallback: look for it in the dialog
-    const dialog = document.querySelector('.modeless-answer-dialog');
-    if (dialog) {
-      const field2 = dialog.querySelector('#correct-answer-field, .field.native-font');
-      if (field2) {
-        const text = (field2.textContent || '').trim();
-        if (text && text.length > 0) {
-          console.log('[Hunter] Scraped correct answer (fallback):', text);
-          return text;
-        }
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Learn from a wrong answer by scraping the correct answer from the overlay
-   * and updating the answerMap. This is the Learn from Error policy (Policy B).
-   * Returns the learned answer text, or null if nothing was learned.
-   */
-  function learnFromError() {
-    const correctAnswer = scrapeCorrectAnswer();
-    if (!correctAnswer || !hunterQuestion) {
-      console.log('[Hunter] Cannot learn - no correct answer or question');
-      return null;
-    }
-
-    const q = norm(hunterQuestion);
-    const a = stripAlts(correctAnswer.trim());
-    if (!q || !a) return null;
-
-    // Update answerMap
-    answerMap[q] = a;
-    answerMap[norm(a)] = hunterQuestion; // bidirectional
-
-    // Persist to localStorage
-    try {
-      let learned = {};
-      const stored = localStorage.getItem(LEARNED_KEY);
-      if (stored) {
-        try { learned = JSON.parse(stored); } catch(e) {}
-      }
-      learned[q] = a;
-      // Keep ring buffer
-      const keys = Object.keys(learned);
-      if (keys.length > MAX_LEARNED) {
-        const toDelete = keys.slice(0, keys.length - MAX_LEARNED);
-        for (const k of toDelete) delete learned[k];
-      }
-      localStorage.setItem(LEARNED_KEY, JSON.stringify(learned));
-      console.log('[Hunter] Learned:', q, '→', a);
-    } catch (e) {
-      console.warn('[Hunter] Failed to persist learned pair:', e);
-    }
-
-    showToast(`🧠 Learned: "${hunterQuestion}" → "${a}"`);
-    setDebug(`🧠 Learned: "${hunterQuestion}" → "${a}"`);
-    return a;
-  }
-
-  /**
-   * Load previously learned pairs from localStorage into answerMap.
-   */
-  function loadLearnedAnswers() {
-    try {
-      const stored = localStorage.getItem(LEARNED_KEY);
-      if (stored) {
-        const learned = JSON.parse(stored);
-        let count = 0;
-        for (const [q, a] of Object.entries(learned)) {
-          if (!answerMap[q]) {
-            answerMap[q] = a;
-            count++;
-          }
-        }
-        if (count > 0) {
-          console.log('[EP] Loaded', count, 'learned pairs from localStorage');
-        }
-      }
-    } catch (e) {
-      console.warn('[EP] Failed to load learned pairs:', e);
-    }
-  }
-
-  /**
-   * Click the "Next" / "Continue" / "Try again" / "OK" button to advance
-   * past the current question. Tries multiple selectors from the EP DOM.
+   * Click the "Next question" button to advance past the current question.
+   * Selectors come from EP's DOM:
+   *   - The primary advance button is `#continue-button` (a nice-button
+   *     inside the game-page / modeless-answer-dialog / paper-mode UI).
+   *   - The button text is "Next question" (verified in
+   *     (5) EP (8_4_2026 3：48：24 PM).html).
    */
   function clickAdvanceButton() {
-    // Priority list of selectors for the "move to next question" button
     const advanceSelectors = [
-      // Continue button inside the modeless-answer-dialog (primary)
+      // Primary: the EP "Next question" button (id from game-page HTML)
       '#continue-button:not([disabled])',
       '.modeless-answer-dialog #continue-button:not([disabled])',
-      // Next-question button (paper mode)
+      // Paper-mode buttons
       '.next-question-button:not([disabled])',
       '#next-question:not([disabled])',
-      // Correct feedback: Continue / Next button
+      // Correct feedback container buttons
       '#correct-button:not([disabled])',
       '.correct-button:not([disabled])',
-      // Any button inside the sa-navigation-controls (EP's nav bar)
+      // SA navigation / information controls (used in some layouts)
+      '.information-controls button:not([disabled])',
       '#sa-navigation-controls button:not([disabled])',
       '.sa-navigation-controls button:not([disabled])',
-      // Information controls (the "i" button that also acts as continue)
-      '.information-controls button:not([disabled])',
-      // Generic fallback: any enabled button in the action bar
-      '.game-action-bar button:not([disabled])',
-      // Cheer-button (post-correct animation)
-      '.cheer-button:not(.ng-hide):not(.sf-hidden)',
-      // The nav-bar-exit (back to list)
+      // Nav-bar-exit (back-to-list from game page)
       '.nav-bar-exit:not([disabled])',
+      // Generic enabled button in game action bar
+      '.game-action-bar button:not([disabled])',
+      // Cheer-button (post-correct animation button)
+      '.cheer-button:not(.ng-hide):not(.sf-hidden)',
     ];
 
     for (const sel of advanceSelectors) {
@@ -583,88 +419,41 @@
       }
     }
 
-    // Last resort: try to find any visible button with matching text
-    const allButtons = document.querySelectorAll('button');
-    for (const btn of allButtons) {
+    // Last-resort: any visible button whose label matches an advance verb.
+    for (const btn of document.querySelectorAll('button')) {
       if (btn.offsetParent === null) continue;
       const text = (btn.textContent || '').trim().toLowerCase();
-      if (/^(next|continue|ok|got it|try again|correct|done)$/i.test(text)) {
+      if (/^(next|continue|next question|ok|got it|done)$/i.test(text)) {
         console.log('[Hunter] Clicking advance by text:', text);
         btn.click();
         return true;
       }
     }
-
     return false;
   }
 
   /**
-   * Detect whether we've reached the end of a list (list-complete screen).
-   * Returns true if the list-starter page is showing with completed stats.
-   */
-  function detectListDone() {
-    const url = window.location.href.toLowerCase();
-    // If we're back on the list-starter page and the start button is visible
-    // with a "Continue" label, the list is done.
-    if (url.includes('list-starter')) {
-      const startLabel = document.getElementById('start-button-main-label');
-      if (startLabel) {
-        const text = (startLabel.textContent || '').trim().toLowerCase();
-        if (text.includes('continue') || text.includes('start')) {
-          return true;
-        }
-      }
-      // Also check if it's the statistics page
-      if (url.includes('list-statistics')) return true;
-    }
-    return false;
-  }
-
-  /**
-   * Auto-navigate to the next list when the current one finishes.
-   * Clicks on the next uncompleted item in the sidebar.
-   */
-  function autoNextList() {
-    const items = document.querySelectorAll('#left-controls-panel .grouped-options > li.item');
-    if (items.length > 0) {
-      let foundCurrent = false;
-      for (const item of items) {
-        if (foundCurrent) {
-          console.log('[Hunter] Auto-navigating to next list');
-          item.click();
-          showToast('⏩ Auto-next list');
-          return true;
-        }
-        if (item.classList.contains('selected') || item.classList.contains('active')) {
-          foundCurrent = true;
-        }
-      }
-    }
-    return false;
-  }
-
-  /**
-   * Dismiss a wrong-answer / incorrect-feedback overlay and continue.
-   * This is the Dismiss & Continue policy (CFG.hunter.errorPolicy: 'dismiss').
-   * It looks for the try-again / continue / next button on the error overlay.
+   * Dismiss & Continue policy — click the dismiss / try-again / next button on
+   * a wrong-answer overlay so the script is never stuck on an error screen.
+   * Selectors derived from the EP game/game-action-bar DOM (#continue-button
+   * is the canonical "Continue / Try again / Next" button on the modeless-answer
+   * dialog and the action-bar-button.try-again class covers the older
+   * AngularJS layouts).
    */
   function dismissWrongAnswer() {
-    // Priority selectors for the dismiss button on a wrong-answer overlay
     const dismissSelectors = [
-      // Continue button in the modeless-answer-dialog (primary for learn/dismiss)
+      // Primary: same ep continue-button (works for wrong AND correct verdicts)
       '#continue-button:not([disabled])',
       '.modeless-answer-dialog #continue-button:not([disabled])',
-      // Try-again button (EP's classic action bar)
+      // Older layout: action-bar-button.try-again
       '.action-bar-button.try-again button:not([disabled])',
       '.action-bar-button.try-again:not(.ng-hide):not(.sf-hidden) button',
-      // The game action bar's try-again
       '.game-action-bar .action-bar-button.try-again button:not([disabled])',
-      // Generic continue / next in the feedback area
+      // Feedback button / SA navigation fallback
       '.feedback-button:not([disabled])',
-      // SA navigation controls (next after wrong answer)
       '#sa-navigation-controls button:not([disabled])',
       '.sa-navigation-controls button:not([disabled])',
-      // The action bar's first enabled button (usually continue/next)
+      // Any enabled action-bar button
       '.game-action-bar .action-bar-button button:not([disabled])',
     ];
 
@@ -677,189 +466,93 @@
       }
     }
 
-    // Fallback: find any visible button with matching text
-    const allButtons = document.querySelectorAll('button');
-    for (const btn of allButtons) {
+    // Last-resort: text-match
+    for (const btn of document.querySelectorAll('button')) {
       if (btn.offsetParent === null) continue;
       const text = (btn.textContent || '').trim().toLowerCase();
-      if (/^(try again|continue|next|ok|got it|retry)$/i.test(text)) {
+      if (/^(try again|continue|next|next question|ok|got it|retry|try it again)$/i.test(text)) {
         console.log('[Hunter] Dismissing wrong answer by text:', text);
         btn.click();
         return true;
       }
     }
-
     return false;
   }
 
   /**
-   * Main Hunter tick — called every ~500ms when Hunter is active.
-   * Implements the IDLE → DETECTED → TYPING → AWAIT_VERDICT → ADVANCE → IDLE
-   * state machine.
+   * Main Hunter tick — runs every ~500ms while Hunter is on.
+   * Implements the IDLE → DETECTED → AWAIT_VERDICT → ADVANCE → IDLE loop and
+   * auto-clicks start buttons while idle on a starter screen.
    */
   function hunterTick() {
     if (!hunterEnabled || pageChanging) return;
 
     const url = window.location.href.toLowerCase();
 
-    // ── Check for list-done state ──
-    if (detectListDone()) {
-      if (hunterState !== 'LIST_DONE') {
-        hunterState = 'LIST_DONE';
-        console.log('[Hunter] List completed!');
-        showToast('🏁 List complete!');
-        setDebug('🏁 List done');
-
-        // Update progress
-        hunterScore.total = hunterScore.correct + hunterScore.incorrect;
-
-        // Auto-continue to next list if configured
-        if (CFG.hunter.autoContinueLists) {
-          setTimeout(() => {
-            const next = autoNextList();
-            if (next) {
-              hunterState = 'IDLE';
-            } else {
-              showToast('🏁 No more lists — Hunter stopped');
-              stopHunter();
-              if (hunterBtn) {
-                hunterBtn.classList.remove('hunter-active');
-                hunterBtn.textContent = '🕵️ Hunter';
-              }
-            }
-          }, CFG.hunter.betweenListDelay);
-        } else {
-          // Auto-restart the current list if start button is available
-          setTimeout(() => {
-            const startMain = document.getElementById('start-button-main');
-            if (startMain && startMain.offsetParent !== null) {
-              startMain.click();
-              hunterState = 'IDLE';
-            }
-          }, 1000);
-        }
-      }
-      return; // Skip the rest of the tick while in LIST_DONE
-    }
-
-    // ── State machine ──
     switch (hunterState) {
 
-      case 'IDLE':
-      case 'LIST_DONE':
-        // Reset for next question
-        hunterQuestionStart = Date.now();
-        hunterLearned = null;
-
-        // Wait for a question to appear
+      case 'IDLE': {
+        // Wait for a question to appear. Detect via the existing #question-text
+        // which is the canonical question label used by the game page.
         const word = getQuestionWord();
         if (word) {
           hunterQuestion = word;
           hunterState = 'DETECTED';
-          hunterNoAdvanceCount = 0;
+          hunterNoAdvance = 0;
           console.log('[Hunter] Question detected:', word);
           updateHunterDebug();
         }
         break;
+      }
 
-      case 'DETECTED':
-        // The existing tryFill() pipeline handles typing. We just wait for
-        // filling to complete, then transition to AWAIT_VERDICT.
+      case 'DETECTED': {
+        // The existing pipeline (tryFill) handles typing. When it's no longer
+        // filling, the question has been submitted — wait for verdict.
         if (!filling) {
           hunterState = 'AWAIT_VERDICT';
           console.log('[Hunter] Waiting for verdict...');
           setDebug('⏳ Waiting for verdict...');
         }
         break;
+      }
 
-      case 'AWAIT_VERDICT':
-        // Check human presence
-        if (hunterHumanSuspended) {
-          setDebug('👤 Human typing — Hunter idle');
-          break; // Don't process verdict while human is typing
-        }
-
+      case 'AWAIT_VERDICT': {
         const verdict = detectVerdict();
         if (verdict === 'incorrect') {
           hunterScore.incorrect++;
-          hunterScore.total++;
+          console.log('[Hunter] Verdict: INCORRECT — dismissing');
+          setDebug('❌ Wrong — dismissing...');
 
-          console.log('[Hunter] Verdict: INCORRECT');
-          recordTelemetry('incorrect', { question: hunterQuestion });
-
-          // ── Learn from Error (Policy B) ──
-          if (CFG.hunter.errorPolicy === 'learn' || CFG.hunter.errorPolicy === 'hybrid') {
-            const learned = learnFromError();
-            if (learned) {
-              hunterLearned = { word: hunterQuestion, answer: learned };
-              showToast(`🧠 Learned: "${hunterQuestion}" → "${learned}"`);
-              setDebug(`🧠 Learned: "${hunterQuestion}" → "${learned}"`);
-              recordTelemetry('learned', { question: hunterQuestion, answer: learned });
-
-              // Tag with confidence
-              if (CFG.hunter.trackConfidence) {
-                updateConfidence(norm(hunterQuestion), 'learned');
-              }
-            } else if (CFG.hunter.errorPolicy === 'hybrid') {
-              console.log('[Hunter] Hybrid: could not learn, falling back to dismiss');
-            }
-          }
-
-          // ── Dismiss (always, even after learning) ──
-          showToast('❌ Wrong — continuing...');
-          setDebug('❌ Wrong — continuing...');
-
-          const dismissed = dismissWrongAnswer();
-          if (dismissed) {
-            setTimeout(() => {
-              hunterState = 'ADVANCE';
-            }, CFG.hunter.advanceDelay);
+          // Dismiss & Continue policy (only policy in v1). We never block on
+          // a wrong answer; we always try to click the dismiss button so the
+          // script never gets stuck.
+          if (dismissWrongAnswer()) {
+            setTimeout(() => { hunterState = 'ADVANCE'; }, CFG.hunter.advanceDelay);
           } else {
             hunterState = 'ADVANCE';
           }
-
           updateHunterDebug();
-          adaptThreshold();
-          adaptTypingSpeed();
-
-        } else if (verdict === 'correct') {
-          hunterScore.correct++;
-          hunterScore.total++;
-
-          console.log('[Hunter] Verdict: CORRECT — advancing');
-          recordTelemetry('correct', { question: hunterQuestion });
-
-          // Update confidence for verified correct answer
-          if (CFG.hunter.trackConfidence && hunterQuestion) {
-            updateConfidence(norm(hunterQuestion), 'verified');
-          }
-
-          showToast('✅ Correct — advancing');
-          setDebug('✅ Correct — advancing');
+        } else if (verdict === 'correct' || verdict === 'unknown') {
+          // 'unknown' = question label disappeared but no verdict seen → still
+          // safe to advance (the EP UI has already moved on).
+          hunterScore.correct += (verdict === 'correct' ? 1 : 0);
+          console.log('[Hunter] Verdict:', verdict, '— advancing');
+          setDebug('✅ Advancing...');
           hunterState = 'ADVANCE';
-
           updateHunterDebug();
-          adaptThreshold();
-          adaptTypingSpeed();
-
-        } else if (verdict === 'unknown') {
-          // Question text disappeared — question is done, just advance
-          hunterState = 'ADVANCE';
         }
-        // null = no verdict yet, stay in AWAIT_VERDICT
+        // null = still waiting, stay in AWAIT_VERDICT
         break;
+      }
 
-      case 'ADVANCE':
+      case 'ADVANCE': {
         if (hunterAdvancing) break;
         hunterAdvancing = true;
-
         console.log('[Hunter] Advancing to next question');
-        setDebug('⏩ Advancing...');
 
         const advanced = clickAdvanceButton();
-
         if (advanced) {
-          hunterNoAdvanceCount = 0;
+          hunterNoAdvance = 0;
           setTimeout(() => {
             hunterState = 'IDLE';
             hunterQuestion = '';
@@ -868,49 +561,56 @@
             updateHunterDebug();
           }, CFG.hunter.advanceDelay);
         } else {
-          hunterNoAdvanceCount++;
+          // No advance button found. Could be a list-complete screen or a real
+          // intersection — try a few times, then give up and let the human
+          // decide.
+          hunterNoAdvance++;
           setTimeout(() => {
             hunterState = 'IDLE';
             hunterQuestion = '';
             lastFilled = '';
             hunterAdvancing = false;
-            if (hunterNoAdvanceCount > 5) {
-              setDebug('🕵️ Stuck? Try clicking start...');
-              // Try clicking the start button
-              const startMain = document.getElementById('start-button-main');
-              if (startMain && startMain.offsetParent !== null) {
-                startMain.click();
+            if (hunterNoAdvance >= 5) {
+              // Last resort: try clicking start-button-main / start-button-school
+              if (CFG.hunter.autoStart) {
+                if (url.includes('list-starter')) {
+                  const sm = document.getElementById('start-button-main');
+                  if (sm && sm.offsetParent !== null) sm.click();
+                } else if (url.includes('activity-starter')) {
+                  const ss = document.getElementById('start-button-school');
+                  if (ss && ss.offsetParent !== null) ss.click();
+                }
               }
-            } else {
-              setDebug('🕵️ Hunter (waiting... )');
             }
-          }, 1000);
+            updateHunterDebug();
+          }, CFG.hunter.advanceDelay);
         }
         break;
-    }
-
-    // ── List-starter auto-start (when Hunter is on) ──
-    if (url.includes('list-starter') && vocabUnlocked && auto) {
-      const startMain = document.getElementById('start-button-main');
-      if (startMain && startMain.offsetParent !== null) {
-        console.log('[Hunter] Clicking start-button-main');
-        startMain.click();
       }
     }
 
-    // ── Activity-starter auto-start ──
-    if (url.includes('activity-starter')) {
-      const startSchool = document.getElementById('start-button-school');
-      if (startSchool && startSchool.offsetParent !== null) {
-        console.log('[Hunter] Clicking start-button-school');
-        startSchool.click();
+    // ── Idle auto-start: keep Hunter busy by clicking start buttons ──
+    // Selectors from EP's list-starter page (file 1) and activity-starter
+    // page (file 2). #start-button-school fires when on activity-starter,
+    // #start-button-main fires when on list-starter.
+    if (CFG.hunter.autoStart) {
+      if (url.includes('list-starter') && vocabUnlocked) {
+        const startMain = document.getElementById('start-button-main');
+        if (startMain && startMain.offsetParent !== null) {
+          console.log('[Hunter] Clicking start-button-main');
+          startMain.click();
+        }
+      } else if (url.includes('activity-starter')) {
+        const startSchool = document.getElementById('start-button-school');
+        if (startSchool && startSchool.offsetParent !== null) {
+          console.log('[Hunter] Clicking start-button-school');
+          startSchool.click();
+        }
       }
     }
   }
 
-  /**
-   * Update the debug line with hunter progress info.
-   */
+  /** Update the panel debug line with current Hunter progress. */
   function updateHunterDebug() {
     if (!debugEl) return;
     const elapsed = hunterStartTime ? Math.floor((Date.now() - hunterStartTime) / 1000) : 0;
@@ -926,252 +626,17 @@
     setDebug(msg);
   }
 
-  // ── Confidence Tracking ════════════════════════════════════════════════════
-
-  /**
-   * Get the confidence score for a normalized answer key.
-   * Returns a number: 0 = unknown, 1 = from grid, 0.5 = learned, 1+ = verified.
-   */
-  function getConfidence(key) {
-    if (!CFG.hunter.trackConfidence) return 1;
-    const entry = confidenceMap[key];
-    return entry ? entry.score : 0;
-  }
-
-  /**
-   * Update the confidence score for a normalized key.
-   */
-  function updateConfidence(key, source) {
-    if (!CFG.hunter.trackConfidence) return;
-    if (!confidenceMap[key]) {
-      confidenceMap[key] = { score: 0, source: source, count: 0 };
-    }
-    const entry = confidenceMap[key];
-    entry.count++;
-
-    if (source === 'grid') entry.score = 1.0;
-    else if (source === 'learned') entry.score = Math.max(entry.score, 0.5);
-    else if (source === 'verified') entry.score = Math.min(entry.score + 0.2, 1.5);
-
-    // Persist periodically
-    try {
-      localStorage.setItem(CONFIDENCE_KEY, JSON.stringify(confidenceMap));
-    } catch (e) { /* ignore */ }
-  }
-
-  /**
-   * Load confidence scores from localStorage.
-   */
-  function loadConfidence() {
-    if (!CFG.hunter.trackConfidence) return;
-    try {
-      const stored = localStorage.getItem(CONFIDENCE_KEY);
-      if (stored) confidenceMap = JSON.parse(stored);
-    } catch (e) { /* ignore */ }
-  }
-
-  // ── Self-Healing Answers ═══════════════════════════════════════════════════
-
-  /**
-   * Enhanced version of stripAlts that also handles:
-   * - Multiple semicolons: "bonjour;salut;hello" → stores all alternates
-   * - Hint trailers: "de rien (← hint)" → "de rien"
-   * - Accent markers: "français with accent" → "français"
-   */
-  function smartStrip(s) {
-    if (!s) return s;
-    let result = s.trim();
-    // Strip parenthetical hints: "word (← hint)" or "word (with accent)"
-    result = result.replace(/\s*\([^)]*\)\s*$/, '').trim();
-    // Strip trailing phrases like "with accent"
-    result = result.replace(/\s+with\s+accent\s*$/i, '').trim();
-    return result;
-  }
-
-  /**
-   * Parse a semicolon-separated answer into multiple alternates.
-   * Returns an array of stripped answers.
-   */
-  function parseAlts(s) {
-    if (!s) return [s];
-    const parts = s.split(';').map(p => smartStrip(p.trim())).filter(Boolean);
-    return parts.length > 0 ? parts : [s];
-  }
-
-  /**
-   * Enhanced version of findAnswer that uses confidence scores.
-   * When multiple matches exist, prefers the one with highest confidence.
-   */
-  function findAnswerWithConfidence(raw) {
-    const q = norm(raw);
-    if (!q) return null;
-
-    // Exact match first
-    if (answerMap[q]) return answerMap[q];
-
-    // Substring match
-    for (const [k, v] of Object.entries(answerMap)) {
-      if (k.includes(q) || q.includes(k)) {
-        if (CFG.hunter.trackConfidence) {
-          const conf = getConfidence(k);
-          if (conf >= 0.3) return v;
-        } else {
-          return v;
-        }
-      }
-    }
-
-    // Fuzzy match with confidence preference
-    let best = 0, bestVal = null, bestConf = 0;
-    for (const [k, v] of Object.entries(answerMap)) {
-      const sc = similarity(q, k);
-      if (sc >= CFG.fuzzyThreshold && sc > best) {
-        const conf = getConfidence(k);
-        if (conf > bestConf || (conf === bestConf && sc > best)) {
-          best = sc;
-          bestVal = v;
-          bestConf = conf;
-        }
-      }
-    }
-
-    // Track score for adaptive threshold
-    if (CFG.hunter.adaptiveThreshold && best > 0) {
-      adaptiveScores.push(best);
-      if (adaptiveScores.length > ADAPTIVE_WINDOW) adaptiveScores.shift();
-    }
-
-    return bestVal;
-  }
-
-  // ── Adaptive Fuzzy Threshold ═══════════════════════════════════════════════
-
-  /**
-   * Self-tune the fuzzy threshold based on the distribution of recent scores.
-   * If many matches are landing near the boundary, raise it.
-   * If many questions are missing by a hair, lower it.
-   */
-  function adaptThreshold() {
-    if (!CFG.hunter.adaptiveThreshold || adaptiveScores.length < 5) return;
-
-    const avg = adaptiveScores.reduce((a, b) => a + b, 0) / adaptiveScores.length;
-    const min = Math.min(...adaptiveScores);
-
-    if (avg > CFG.fuzzyThreshold * 1.5 && CFG.fuzzyThreshold < adaptiveMaxThreshold) {
-      // Most matches are well above threshold — we can be more strict
-      CFG.fuzzyThreshold = Math.min(CFG.fuzzyThreshold + 1, adaptiveMaxThreshold);
-      console.log('[Adaptive] Raised threshold to', CFG.fuzzyThreshold);
-    } else if (min < CFG.fuzzyThreshold * 0.8 && CFG.fuzzyThreshold > adaptiveMinThreshold) {
-      // Some matches are barely above — be more lenient
-      CFG.fuzzyThreshold = Math.max(CFG.fuzzyThreshold - 1, adaptiveMinThreshold);
-      console.log('[Adaptive] Lowered threshold to', CFG.fuzzyThreshold);
-    }
-  }
-
-  // ── Adaptive Typing Speed ══════════════════════════════════════════════════
-
-  /**
-   * Adjust typeDelay based on success rate. If we're getting >90% correct,
-   * we can type faster. If we're getting <70% correct, slow down.
-   */
-  function adaptTypingSpeed() {
-    if (!CFG.hunter.adaptiveSpeed) return;
-    const total = hunterScore.correct + hunterScore.incorrect;
-    if (total < 5) return; // not enough data
-
-    const pct = hunterScore.correct / total;
-    if (pct > 0.9 && CFG.typeDelay > 0) {
-      CFG.typeDelay = Math.max(0, CFG.typeDelay - 2);
-      console.log('[Adaptive] Speed up: typeDelay =', CFG.typeDelay);
-    } else if (pct < 0.7) {
-      CFG.typeDelay = Math.min(50, CFG.typeDelay + 5);
-      console.log('[Adaptive] Slow down: typeDelay =', CFG.typeDelay);
-    }
-  }
-
-  // ── Telemetry ══════════════════════════════════════════════════════════════
-
-  /**
-   * Record a telemetry event for the current session.
-   */
-  function recordTelemetry(event, data) {
-    if (!CFG.hunter.telemetry) return;
-    try {
-      if (!telemetryData) {
-        const stored = localStorage.getItem(TELEMETRY_KEY);
-        telemetryData = stored ? JSON.parse(stored) : { sessions: [] };
-      }
-
-      const today = new Date().toISOString().split('T')[0];
-      let session = telemetryData.sessions.find(s => s.date === today);
-      if (!session) {
-        session = { date: today, correct: 0, incorrect: 0, learned: 0, time: 0, questions: [] };
-        telemetryData.sessions.push(session);
-        // Keep only last 30 days
-        if (telemetryData.sessions.length > 30) telemetryData.sessions.shift();
-      }
-
-      if (event === 'correct') session.correct++;
-      else if (event === 'incorrect') session.incorrect++;
-      else if (event === 'learned') session.learned++;
-
-      if (data) session.questions.push(data);
-
-      localStorage.setItem(TELEMETRY_KEY, JSON.stringify(telemetryData));
-    } catch (e) { /* ignore */ }
-  }
-
-  /**
-   * Export telemetry data as a downloadable JSON file.
-   */
-  function exportTelemetry() {
-    try {
-      const stored = localStorage.getItem(TELEMETRY_KEY);
-      if (!stored) {
-        showToast('📊 No telemetry data yet');
-        return;
-      }
-
-      const blob = new Blob([stored], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `ep-telemetry-${new Date().toISOString().split('T')[0]}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-      showToast('📊 Telemetry exported');
-    } catch (e) {
-      console.warn('[Telemetry] Export failed:', e);
-      showToast('⚠️ Export failed');
-    }
-  }
-
-  /**
-   * Start the Hunter loop. Called when the user toggles Hunter on.
-   */
+  /** Start Hunter Mode. Idempotent. */
   function startHunter() {
     if (hunterTimer) clearInterval(hunterTimer);
 
-    // Load previously learned pairs from localStorage
-    loadLearnedAnswers();
-
-    // Load confidence scores
-    loadConfidence();
-
-    // Reset adaptive state
-    adaptiveScores = [];
-
-    hunterEnabled = true;
-    hunterState = 'IDLE';
-    hunterQuestion = '';
+    hunterEnabled   = true;
+    hunterState     = 'IDLE';
+    hunterQuestion  = '';
     hunterAdvancing = false;
-    hunterScore = { correct: 0, incorrect: 0, total: 0 };
+    hunterScore     = { correct: 0, incorrect: 0 };
     hunterStartTime = Date.now();
-    hunterQuestionStart = 0;
-    hunterLearned = null;
-    hunterNoAdvanceCount = 0;
-    hunterHumanActive = false;
-    hunterHumanSuspended = false;
+    hunterNoAdvance = 0;
 
     hunterTimer = setInterval(hunterTick, 500);
     console.log('[Hunter] Started');
@@ -1179,22 +644,18 @@
     setDebug('🕵️ Hunter ready');
   }
 
-  /**
-   * Stop the Hunter loop.
-   */
+  /** Stop Hunter Mode. Idempotent. */
   function stopHunter() {
     if (hunterTimer) {
       clearInterval(hunterTimer);
       hunterTimer = null;
     }
-    hunterEnabled = false;
-    hunterState = 'IDLE';
+    hunterEnabled   = false;
+    hunterState     = 'IDLE';
     hunterAdvancing = false;
-    hunterQuestion = '';
-    hunterLearned = null;
+    hunterQuestion  = '';
     console.log('[Hunter] Stopped');
 
-    // Show session summary
     const total = hunterScore.correct + hunterScore.incorrect;
     if (total > 0) {
       const pct = total > 0 ? Math.round((hunterScore.correct / total) * 100) : 0;
@@ -1209,68 +670,75 @@
   }
 
   /**
-   * Skip the current list / task and navigate to the next available task
-   * in the sidebar/content browser. This works by:
-   * 1. Finding the current task item in the list-starter's grouped-options
-   * 2. Clicking the next uncompleted item
-   * 3. If no next item, navigate back to the content browser
+   * Skip the entire current list / task list and jump straight to the next task.
+   * Implementation targets the EP list-starter page DOM:
+   *   - Sidebar tasks live under `#stats-parent .starter-panel .grouped-options > li.item`
+   *     (verified in EP (8_4_2026 3：48：05 PM).html).
+   *   - If we're on a list-starter page, find the selected task and click the
+   *     next one (or the first if none is selected).
+   *   - If no next task exists in the sidebar, fall back to going back via
+   *     the breadcrumb `.breadcrumbs .crumb`.
+   *   - If we're in a game, navigate back to the list-starter via the
+   *     `#sa-navigation-controls .back-button` or any link to list-starter.
    */
   function skipToNextTask() {
     const url = window.location.href.toLowerCase();
 
-    // If we're on a list-starter page, find the next task in the sidebar
     if (url.includes('list-starter')) {
-      // The grouped-options contains all tasks in the current section
       const items = document.querySelectorAll('#stats-parent .starter-panel .grouped-options > li.item');
-
       if (items.length > 0) {
-        // Find the currently active/selected item
         let foundCurrent = false;
+        let clicked = false;
         for (const item of items) {
           if (foundCurrent) {
-            // Click the next item
             item.click();
-            showToast('⏭ Skipped to next task');
-            console.log('[Hunter] Skipped to next task');
-            return;
+            clicked = true;
+            break;
           }
           if (item.classList.contains('selected') || item.classList.contains('active')) {
             foundCurrent = true;
           }
         }
-        // If no next item was found, try to go back to the browse view
-        showToast('⏭ No more tasks — going back');
-        console.log('[Hunter] No more tasks');
+        if (clicked) {
+          showToast('⏭ Skipped to next task');
+          console.log('[Hunter] Skipped to next task');
+          return;
+        }
+        // No currently-active task was found → click the first item.
+        if (!foundCurrent) {
+          items[0].click();
+          showToast('⏭ Skipped to next task');
+          console.log('[Hunter] Skipped to first task in list');
+          return;
+        }
+        showToast('⏭ No more tasks in this list');
       }
 
-      // Fallback: click the breadcrumb to go back
-      const backCrumb = document.querySelector('.breadcrumbs .crumb');
-      if (backCrumb) {
-        backCrumb.click();
+      // Fallback: breadcrumb back to the course view
+      const crumb = document.querySelector('.breadcrumbs .crumb, .crumb-child');
+      if (crumb) {
+        crumb.click();
         showToast('⏭ Back to course view');
+        console.log('[Hunter] Back to course view');
       }
       return;
     }
 
-    // If we're in a game/activity, navigate back to the list starter
     if (url.includes('game') || url.includes('activity-starter')) {
-      // Look for a back/close button or the sidebar navigation
       const backBtn = document.querySelector('#sa-navigation-controls .back-button, .back-button, [data-action="back"]');
       if (backBtn) {
         backBtn.click();
         showToast('⏭ Going back to list');
         return;
       }
-
-      // Fallback: try to find the list starter route
       const listLink = document.querySelector('a[href*="list-starter"], [ng-click*="list-starter"]');
       if (listLink) {
         listLink.click();
         showToast('⏭ Navigating to list');
         return;
       }
-
-      showToast('⚠️ No back button found');
+      showToast('⚠️ No back button on this screen');
+      console.log('[Hunter] No back button found on', url);
       return;
     }
 
@@ -1333,17 +801,14 @@
         </div>
         <div id="ep-btns2" style="display:flex;gap:5px;margin-bottom:8px">
           <button class="ep-btn" id="ep-hunter">🕵️ Hunter</button>
-          <button class="ep-btn skip-btn" id="ep-skip">⏭ Skip</button>
-        </div>
-        <div id="ep-btns3" style="display:flex;gap:5px;margin-bottom:4px">
-          <button class="ep-btn" id="ep-export" style="font-size:10px;min-width:auto;flex:0.5">📊 Export</button>
+          <button class="ep-btn skip-btn" id="ep-skip">⏭ Skip list</button>
         </div>
         <div id="ep-hint">Select a task to activate.</div>
         <div id="ep-debug"></div>
       </div>
     `;
     document.body.appendChild(panel);
- 
+
     countEl    = panel.querySelector('#ep-count');
     toggleBtn  = panel.querySelector('#ep-toggle');
     debugEl    = panel.querySelector('#ep-debug');
@@ -1351,7 +816,6 @@
     aiBtn      = panel.querySelector('#ep-ai');
     hunterBtn  = panel.querySelector('#ep-hunter');
     skipBtn    = panel.querySelector('#ep-skip');
-    const exportBtn = panel.querySelector('#ep-export');
  
     autoBtn.addEventListener('click', () => {
       showToast('Auto mode');
@@ -1389,13 +853,6 @@
     skipBtn.addEventListener('click', () => {
       skipToNextTask();
     });
-
-    // ── Export button ──
-    if (exportBtn) {
-      exportBtn.addEventListener('click', () => {
-        exportTelemetry();
-      });
-    }
 
     makeDraggable(panel, panel.querySelector('#ep-handle'));
     updatePanelVisibility();
@@ -1450,7 +907,7 @@
         !url.includes('game')) {
       aiUnlocked = false;
     }
- 
+
     const loadBtn   = document.querySelector('#ep-load');
     const pauseBtn  = document.querySelector('#ep-toggle');
     const countEl   = document.querySelector('#ep-count');
@@ -1458,30 +915,22 @@
     const hunterBtn = document.querySelector('#ep-hunter');
     const skipBtn   = document.querySelector('#ep-skip');
     const btns2Row  = document.querySelector('#ep-btns2');
-    const btns3Row  = document.querySelector('#ep-btns3');
-    const exportBtn = document.querySelector('#ep-export');
     const hintTxt   = document.querySelector('#ep-hint');
     const debugTxt  = document.querySelector('#ep-debug');
- 
+
     if (loadBtn)   loadBtn.style.display   = vocabUnlocked ? '' : 'none';
     if (pauseBtn)  pauseBtn.style.display  = vocabUnlocked ? '' : 'none';
     if (countEl)   countEl.style.display   = vocabUnlocked ? '' : 'none';
- 
+
     if (aiBtn)     aiBtn.style.display     = aiUnlocked ? '' : 'none';
- 
-    // Show Hunter & Skip buttons on any task page (list-starter, activity-starter, or game)
+
+    // Show Hunter & Skip buttons on any task page (list-starter, activity-starter, or game).
+    // Selectors verified against the three EP HTML snapshots in Implement/.
     const isTaskPage = url.includes('list-starter') || url.includes('activity-starter') || url.includes('game');
     if (btns2Row)  btns2Row.style.display  = isTaskPage ? 'flex' : 'none';
     if (hunterBtn) hunterBtn.style.display = isTaskPage ? '' : 'none';
     if (skipBtn)   skipBtn.style.display   = isTaskPage ? '' : 'none';
 
-    // Show Export button always (visible when panel is visible)
-    if (btns3Row)  btns3Row.style.display  = 'flex';
-    if (exportBtn) {
-      exportBtn.title = 'Export telemetry data';
-      exportBtn.style.display = '';
-    }
- 
     if (hintTxt) hintTxt.style.display = hints ? '' : 'none';
     if (vocabUnlocked) hintTxt.innerHTML = hintsList.list;
     if (aiUnlocked) hintTxt.innerHTML = hintsList.activity;
