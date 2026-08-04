@@ -29,7 +29,7 @@
     activity: "Auto-selects or type the correct answer using AI.",
   };
 
-  // ── Hunter Mode Config (Phase 2) ───────────────────────────────────────────
+  // ── Hunter Mode Config (Phase 2 + Phase 3) ─────────────────────────────────
   // Per-flag notes:
   //   enabled            master toggle; default OFF (user must opt in)
   //   advanceDelay       ms after verdict before clicking Next
@@ -40,6 +40,16 @@
   //   maxQuestionsPerRun soft cap on questions before auto-stopping Hunter (0 = ∞)
   //   humanPresenceWindow  ms of real-user activity that pauses Hunter before
   //                         resuming automatically
+  // ── Phase 3 knobs ──
+  //   maxAdvanceAttempts   how many "advance click failed" cycles before Hunter
+  //                         gives up and assumes the list/page is done.
+  //   stuckStateMs         if the Hunter state hasn't transitioned out of the
+  //                         current node in this many ms, force-reset to IDLE.
+  //   safeMinDelayMs       lower bound for any setTimeout inside the tick loop
+  //                         (so misconfigurations can't fire clicks during
+  //                         EP's animation frames).
+  //   safeMaxDelayMs       upper bound for any setTimeout (sanity).
+  //   watchdogMs           if no state change for this many ms, force-reset.
   const CFG = {
     fuzzyThreshold : 10,
     typeDelay      : 0,
@@ -56,6 +66,12 @@
       autoContinueLists  : false,
       maxQuestionsPerRun : 0,
       humanPresenceWindow: 1500,
+      // ── Phase 3 additions ──
+      maxAdvanceAttempts : 5,
+      stuckStateMs       : 30000,
+      safeMinDelayMs     : 80,
+      safeMaxDelayMs     : 5000,
+      watchdogMs         : 120000,
     },
   };
 
@@ -86,6 +102,120 @@
   let vocabUnlocked = false;
   let aiUnlocked    = false;
 
+  // ─── Phase 3: Universal DOM helpers ───────────────────────────────────────
+  //  These are deliberately conservative. Every check below protects against
+  //  a class of failure observed on real Education Perfect snapshots:
+  //   - elements can be in the DOM tree but invisible (opacity:0,
+  //     visibility:hidden, display:none, ng-hide, sf-hidden, zero-size)
+  //   - buttons can be disabled in three ways simultaneously
+  //     (HTML disabled, ng-disabled="x", aria-disabled="true")
+  //   - elements can disappear between queries and clicks (SP navigation,
+  //     CSS animations, v-if removal)
+  //   - selectors can match more than one element (we always pick the FIRST
+  //     or the LAST truly-visible one)
+  //  Rule: never click anything that isVisible() / isEnabled() rejects.
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /** Returns true only when el is connected AND has a non-zero bounding box
+   *  AND does not carry any of EP's "hidden" markers. */
+  function isVisible(el) {
+    if (!el || !(el instanceof Element)) return false;
+    if (!el.isConnected) return false;
+    // offsetParent === null catches display:none + detached nodes.
+    // BUT — position:fixed elements also have null offsetParent, so we
+    // additionally check getBoundingClientRect().
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    const cs = window.getComputedStyle(el);
+    if (cs.visibility === 'hidden' || cs.display === 'none' || cs.opacity === '0') return false;
+    // EP-specific: ng-hide / sf-hidden classes that EP injects when an
+    // element should be visually gone but isn't removed from the DOM.
+    if (el.classList.contains('ng-hide') || el.classList.contains('sf-hidden')) return false;
+    if (el.closest && (el.closest('.ng-hide') || el.closest('.sf-hidden') ||
+                        el.closest('[hidden]'))) return false;
+    return true;
+  }
+
+  /** True when a <button>-ish element is enabled from all three angles. */
+  function isEnabled(el) {
+    if (!el) return false;
+    if (el.disabled) return false;
+    const ngDisabled = el.getAttribute && el.getAttribute('ng-disabled');
+    if (ngDisabled === 'true' || ngDisabled === true) return false;
+    if (el.getAttribute && el.getAttribute('aria-disabled') === 'true') return false;
+    // EP reads disabled state through JS too; the [disabled] attribute is
+    // a normal HTML attribute, but ng-disabled is a string expression.
+    return true;
+  }
+
+  /** Like document.querySelector but only returns the first isVisible match.
+   *  Returns null if nothing is visible. */
+  function queryVisible(selector, root) {
+    const list = (root || document).querySelectorAll(selector);
+    for (const el of list) {
+      if (isVisible(el)) return el;
+    }
+    return null;
+  }
+
+  /** Like Array.from(querySelectorAll(...)).filter(isVisible). */
+  function queryAllVisible(selector, root) {
+    return Array.from((root || document).querySelectorAll(selector))
+                .filter(isVisible);
+  }
+
+  /** Safe click — only fires if visible AND enabled. Returns true on click. */
+  function safeClick(el) {
+    if (!isVisible(el) || !isEnabled(el)) return false;
+    try {
+      // Scroll into view so EP's click handler has a real target and so the
+      // offscreen-but-not-display:none case is handled.
+      if (el.scrollIntoView) el.scrollIntoView({ block: 'center', behavior: 'instant' });
+      el.click();
+      return true;
+    } catch (e) {
+      console.warn('[Hunter] safeClick threw:', e);
+      return false;
+    }
+  }
+
+  /** Clamp a numeric duration to a safe range so a misconfigured CFG can't
+   *  freeze the page or race EP's animations. */
+  function clampMs(ms, lo, hi) {
+    ms = Number(ms);
+    if (!isFinite(ms) || isNaN(ms)) return lo;
+    if (ms < lo) return lo;
+    if (ms > hi) return hi;
+    return ms;
+  }
+
+  /** waitFor: polls the selector until visible or timeout. Resolves with
+   *  the element or null. Caller decides what to do with null. */
+  function waitFor(selector, timeoutMs, intervalMs) {
+    timeoutMs  = clampMs(timeoutMs,  50,  15000);
+    intervalMs = clampMs(intervalMs, 25,   1000);
+    return new Promise(resolve => {
+      const deadline = Date.now() + timeoutMs;
+      const tick = () => {
+        const el = queryVisible(selector);
+        if (el) return resolve(el);
+        if (Date.now() >= deadline) return resolve(null);
+        setTimeout(tick, intervalMs);
+      };
+      tick();
+    });
+  }
+
+  /** Returns true when a modal / overlay is currently shown. Treats
+   *  `.modal.in`, `.modal.fade.in`, and `.ng-hide` absence. */
+  function isModalShown(el) {
+    if (!el || !(el instanceof Element)) return false;
+    if (!isVisible(el)) return false;
+    const cs = window.getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+    return true;
+  }
+
   // ── Hunter Mode runtime state ─────────────────────────────────────────────
   // 6-state machine:
   //   IDLE          : waiting for a new question to appear
@@ -96,7 +226,10 @@
   //   LIST_DONE     : end-of-list reached (or no more next-list items)
   let hunterEnabled          = false;
   let hunterTimer            = null;
+  let hunterDelayedTimers    = [];   // setTimeout handles inside Hunter — all cleared on stop
   let hunterState            = 'IDLE';
+  let hunterPrevState        = 'IDLE';
+  let hunterStateEntryMs     = 0;    // wall-clock at last state change (for watchdog)
   let hunterQuestion         = '';
   let hunterAdvancing        = false;
   let hunterScore            = { correct: 0, incorrect: 0 };
@@ -111,6 +244,10 @@
 
   // Phase 2: learn-from-error + cap
   let hunterQuestionsAnswered = 0;
+
+  // ─── Phase 3: lifecycle / watcher plumbing ───────────────────────────────
+  let hunterLastPageUrl      = '';   // detect SPA route changes
+  let hunterLastActiveMs     = 0;    // last tick observed activity on the page
 
   // ── Page-change / unload guards ───────────────────────────────────────────
   window.addEventListener('beforeunload', () => {
@@ -349,33 +486,88 @@
   // ── Phase 2: scrape / learn / persist ─────────────────────────────────────
 
   /** Read EP's revealed correct answer from the wrong-answer modal.
+   *  Phase 3 hardening:
+   *   - Searches through several known field selectors (verified across
+   *     Implement/*), checking isVisible + non-empty text in each.
+   *   - Strips things like "Correct answer:" / leading colons / hint
+   *     trailers so we don't poison the learned map.
+   *   - Caps answer length at 200 chars so an accidental tooltip / banner
+   *     grab can't pollute the answerMap.
+   *   - Returns null cleanly so the caller can fall back to dismiss.
    *  Selectors verified in `Implement/(5) EP (8_4_2026 3：48：24 PM).html`.
    */
   function scrapeCorrectAnswer() {
-    const field = document.getElementById('correct-answer-field');
-    if (field) {
-      const text = (field.textContent || '').trim();
-      if (text && text.length > 0) return text;
+    // 1. Direct id, anywhere in the DOM (the modal may or may not be visible).
+    const direct = document.getElementById('correct-answer-field');
+    if (direct && (direct.textContent || '').trim()) {
+      return cleanScrapedAnswer(direct.textContent);
     }
-    const dialog = document.querySelector('.modeless-answer-dialog');
-    if (dialog && dialog.offsetParent !== null) {
-      const field2 = dialog.querySelector('#correct-answer-field, .field.native-font');
-      if (field2) {
-        const text = (field2.textContent || '').trim();
-        if (text && text.length > 0) return text;
+    // 2. Inside the modeless-answer-dialog.
+    const dialog = queryVisible('.modeless-answer-dialog');
+    if (dialog) {
+      // The dialog has <tr.correct> and <tr.incorrect> rows — the correct
+      // row's last cell holds the user/answer text. We extract from the
+      // correct-row if present (it's the post-verdict correct-display),
+      // else from the field.
+      const correct = dialog.querySelector('tr.correct');
+      if (correct) {
+        const fields = correct.querySelectorAll('.native-font, td');
+        const text = lastFieldText(fields);
+        if (text) return cleanScrapedAnswer(text);
       }
+      const fieldsInDialog = dialog.querySelectorAll('#correct-answer-field, .field.native-font');
+      const text = lastFieldText(fieldsInDialog);
+      if (text) return cleanScrapedAnswer(text);
+    }
+    // 3. Anywhere visible in the document — last-resort.
+    const anyField = queryVisible('#correct-answer-field, .correct-popup .native-font');
+    if (anyField && (anyField.textContent || '').trim()) {
+      return cleanScrapedAnswer(anyField.textContent);
     }
     return null;
   }
 
+  /** Pick the longest non-empty textContent from a NodeList. EP renders the
+   *  answer in the LAST td of the correct-row, not the first. */
+  function lastFieldText(nodes) {
+    let best = null;
+    for (const n of nodes) {
+      const t = (n && n.textContent || '').trim();
+      if (t && (!best || t.length > best.length)) best = t;
+    }
+    return best;
+  }
+
+  /** Strip the noise EP sometimes tacks onto the answer: "Correct answer: x",
+   *  trailing hints in parentheses, leading quotes / colons. */
+  function cleanScrapedAnswer(raw) {
+    if (!raw) return null;
+    let s = String(raw).trim().replace(/\s+/g, ' ');
+    // Strip a "Correct answer:" prefix (any locale-friendly variant).
+    s = s.replace(/^(correct\s*answer\s*[:\-]?\s*)/i, '');
+    s = s.replace(/^["'\u201c\u201d\u2018\u2019]+|["'\u201c\u201d\u2018\u2019]+$/g, '');
+    s = s.replace(/^[:\-ï¼š]\s*/, '');
+    s = s.replace(/\s*\([^)]*(hint|exemple|example|note)[^)]*\)\s*$/i, '');
+    s = s.trim();
+    if (s.length < 1 || s.length > 200) return null;
+    return s;
+  }
+
   /** Read the question word from the wrong-answer modal so we can attribute
-   *  the learned answer to the correct key.
-   */
+   *  the learned answer to the correct key. Phase 3: also falls back to the
+   *  left-side label inside the modal before falling back to the live
+   *  question span. */
   function scrapeQuestionFromModal() {
-    const field = document.getElementById('question-field');
-    if (field) {
-      const text = (field.textContent || '').trim();
-      if (text && text.length > 0) return text;
+    const direct = document.getElementById('question-field');
+    if (direct && (direct.textContent || '').trim()) {
+      return cleanScrapedAnswer(direct.textContent);
+    }
+    const dialog = queryVisible('.modeless-answer-dialog');
+    if (dialog) {
+      const q = dialog.querySelector('#question-field, .question.native-font');
+      if (q && (q.textContent || '').trim()) {
+        return cleanScrapedAnswer(q.textContent);
+      }
     }
     // Fallback to the live question span if the modal didn't render it.
     return getQuestionWord();
@@ -387,19 +579,25 @@
    */
   function learnFromError() {
     const correctAnswer = scrapeCorrectAnswer();
-    // Use the modal's question when available; otherwise fall back to the
-    // already-tracked hunterQuestion.
     const modalQuestion = scrapeQuestionFromModal();
     const qSrc = modalQuestion || hunterQuestion;
-    if (!correctAnswer || !qSrc) return null;
-
+    if (!correctAnswer || !qSrc) {
+      // Nothing usable — return null so caller can fall back to dismiss.
+      return null;
+    }
     const q = norm(qSrc);
-    const a = stripAlts(correctAnswer.trim());
+    const a = stripAlts(correctAnswer);
     if (!q || !a) return null;
 
-    // Bidirectional: q → a and (norm of a) → original word
-    answerMap[q] = a;
-    answerMap[norm(a)] = qSrc;
+    // Don't accidentally erase a previously-good answerMap entry.
+    // (We learned from this mistake; we shouldn't lose the original fuzzy
+    //  matches that worked before.)
+    if (!answerMap[q]) answerMap[q] = a;
+    const aKey = norm(a);
+    if (aKey && aKey !== q && !answerMap[aKey]) answerMap[aKey] = qSrc;
+
+    // Let the re-typing of this question happen cleanly.
+    lastFilled = '';
 
     try {
       let learned = {};
@@ -408,7 +606,6 @@
         try { learned = JSON.parse(stored) || {}; } catch (e) { learned = {}; }
       }
       learned[q] = a;
-      // Ring-buffer: keep the most recent LEARNED_CAP pairs.
       const keys = Object.keys(learned);
       if (keys.length > LEARNED_CAP) {
         const drop = keys.slice(0, keys.length - LEARNED_CAP);
@@ -419,23 +616,26 @@
     } catch (e) {
       console.warn('[Hunter] Failed to persist learned pair:', e);
     }
-    // A learn counts as a question for the soft stop-cap purposes.
     hunterQuestionsAnswered++;
     setDebug(`🧠 Learned "${qSrc}" → "${a}"`);
     return a;
   }
 
   /** Load previously-learned pairs from localStorage into answerMap.
-   *  Called when Hunter starts so the script gets smarter on every launch.
-   */
+   *  Phase 3 hardening: drops malformed entries instead of throwing.
+   *  A poisoned localStorage can't crash Hunter. */
   function loadLearnedAnswers() {
     try {
       const stored = localStorage.getItem(LEARNED_KEY);
       if (!stored) return 0;
       const learned = JSON.parse(stored) || {};
+      if (typeof learned !== 'object' || Array.isArray(learned)) return 0;
       let count = 0;
       for (const [q, a] of Object.entries(learned)) {
-        if (q && a && !answerMap[q]) {
+        if (typeof q === 'string' && typeof a === 'string' &&
+            q.length > 0 && a.length > 0 &&
+            q.length < 200 && a.length < 200 &&
+            !answerMap[q]) {
           answerMap[q] = a;
           count++;
         }
@@ -485,92 +685,110 @@
   /** Auto-navigate to the next list / task. Returns true if a next
    *  item was clicked. Best-effort DOM driver covering both legacy
    *  list-starter and modern hybrid pages.
+   *  Phase 3 hardening:
+   *   - Uses isVisible() on every candidate so off-screen / hidden / ng-hide
+   *     items cannot drive Hunter into a no-op loop.
+   *   - Considers BOTH the sidebar task list (`<li title="...">`) and the
+   *     mode-locked options (`<li class="item mode-X">`) so it works across
+   *     EP's list-starter reorganisations (verified across files 1, 4, 5, 7).
+   *   - Logs every attempt and what was visible at the moment.
    */
   function autoNextList() {
     const url = window.location.href.toLowerCase();
 
     if (url.includes('list-starter')) {
+      // Two distinct kinds of li items live in list-starter:
+      //   ① sidebar task list — `<li title="11ENG Line 2.1 English">` style
+      //   ② mode/option items — `<li class="item mode-X selected">`
+      // We try both selector chains as fallbacks.
       const itemSelectors = [
+        '#stats-parent li[title]',
+        '#stats-parent .starter-panel li[title]',
+        '#left-controls-panel li[title]',
         '#stats-parent .starter-panel .grouped-options > li.item',
         '#left-controls-panel .grouped-options > li.item',
         '.grouped-options > li.item',
       ];
       let items = [];
       for (const sel of itemSelectors) {
-        items = [...document.querySelectorAll(sel)];
+        items = queryAllVisible(sel);
         if (items.length > 0) break;
       }
-      if (items.length === 0) return false;
+      if (items.length === 0) {
+        console.warn('[Hunter] autoNext: no list items visible');
+        return false;
+      }
 
       let foundCurrent = false;
       for (const item of items) {
         if (foundCurrent) {
-          item.click();
-          console.log('[Hunter] autoNext: clicked sidebar item');
-          return true;
+          if (safeClick(item)) {
+            console.log('[Hunter] autoNext: clicked sidebar item');
+            return true;
+          }
+          continue;
         }
         if (item.classList.contains('selected') ||
             item.classList.contains('active')   ||
-            item.classList.contains('current')) {
+            item.classList.contains('current')  ||
+            item.getAttribute('aria-selected') === 'true') {
           foundCurrent = true;
         }
       }
       // No "next" after the current — open the first not-completed item.
       for (const item of items) {
-        if (item.classList.contains('not-started') ||
-            !item.classList.contains('completed')) {
-          item.click();
-          console.log('[Hunter] autoNext: opened first non-completed task');
-          return true;
+        const cls = item.className || '';
+        if (cls.includes('not-started') || !cls.includes('completed')) {
+          if (safeClick(item)) {
+            console.log('[Hunter] autoNext: opened first non-completed task');
+            return true;
+          }
         }
       }
       return false;
     }
 
     if (url.includes('game')) {
-      const btns = document.querySelectorAll(
-        '.game-action-bar .action-bar-button button:not([disabled]), ' +
-        '#sa-navigation-controls button:not([disabled]), ' +
-        'button[data-action="next-list"]'
-      );
-      for (const b of btns) {
+      for (const b of queryAllVisible('button')) {
+        if (!isEnabled(b)) continue;
         const t = (b.textContent || '').trim().toLowerCase();
         if (/next list|next task|continue|finish/.test(t)) {
-          b.click();
-          console.log('[Hunter] autoNext: clicked next-list button in-game');
-          return true;
+          if (safeClick(b)) {
+            console.log('[Hunter] autoNext: clicked next-list button in-game');
+            return true;
+          }
         }
       }
-      const listLink = document.querySelector(
+      const listLink = queryVisible(
         'a[href*="list-starter"], [ng-click*="list-starter"]'
       );
-      if (listLink) {
-        listLink.click();
-        return true;
-      }
+      if (listLink && safeClick(listLink)) return true;
     }
     return false;
   }
 
-  // ── Phase 2: human-presence detector ──────────────────────────────────────
-
-  /** Watch for real user interaction in the answer field. While a human is
-   *  actively typing/clicking, Hunter is suspended. After
-   *  humanPresenceWindow ms of silence, Hunter resumes automatically.
-   *  Selector priority verified in `Implement/(5) EP (8_4 8_5 8_55).html`.
-   */
+  // ── Phase 2: human-presence detector (Phase 3 hardened) ──────────────────────────────────────
+  //  Phase 3 hardening:
+  //   - Listens on keydown / click / input / paste / scroll / wheel / blur
+  //     (capture phase, beats EP's Angular handlers).
+  //   - All event handling is short-circuited when Hunter is off so we
+  //     don't waste cycles.
+  //   - The reset timer ref is tracked so stopHunter() can clear it.
+  //   - Idle callback bumps the watchdog so consecutive user interactions
+  //     never let Hunter get stuck suspended.
   function onHumanInteraction(e) {
     if (!hunterEnabled) return;
-    const target = e.target;
-    const isAnswerField = target && (
-      target.id === 'answer-text' ||
+    const target = e && e.target;
+    if (!target) return;
+    const isAnswerField = target.matches && (
+      target.matches('#answer-text, [contenteditable]') ||
+      target.isContentEditable ||
       (target.closest && (
         target.closest('#answer-text') ||
         target.closest('#answer-block') ||
         target.closest('.lp-question-content') ||
         target.closest('[contenteditable]')
-      )) ||
-      target.isContentEditable
+      ))
     );
     if (!isAnswerField) return;
 
@@ -586,176 +804,298 @@
       hunterHumanActive    = false;
       hunterHumanSuspended = false;
       console.log('[Hunter] Human idle — resuming');
+      // Bump watchdog so we don't reset mid-resume.
+      hunterStateEntryMs = Date.now();
       updateHunterDebug();
-    }, CFG.hunter.humanPresenceWindow);
+    }, clampMs(CFG.hunter.humanPresenceWindow, 100, 30000));
+
+    // Reset the global "last activity" so the watchdog doesn't fire.
+    hunterLastActiveMs = Date.now();
   }
 
   // ── Verdict detection (Phase 2) ───────────────────────────────────────────
 
   function detectVerdict() {
-    // 1. modeless-answer-dialog: tr.correct/incorrect.
-    const dialog = document.querySelector('.modeless-answer-dialog');
-    if (dialog && dialog.offsetParent !== null) {
-      const incorrectRow = dialog.querySelector('tr.incorrect');
-      const correctRow   = dialog.querySelector('tr.correct');
-      if (incorrectRow && incorrectRow.offsetParent !== null) return 'incorrect';
-      if (correctRow   && correctRow.offsetParent !== null   ) return 'correct';
+    // 1. PRIMARY live signal: #answer-text-container ng-class. Verified in
+    //    file 1 (`Implement/(5) EP (8_4_2026 3：48：24 PM).html`):
+    //    "<div id=answer-text-container ... ng-class=\" { correct: ..==2,
+    //    error: ..==1 }\">" — Angular flips these classes synchronously
+    //    when grading completes, so this is far more reliable than the
+    //    modal-row / cheer-button heuristics.
+    const answerContainer = document.getElementById('answer-text-container');
+    if (answerContainer && isVisible(answerContainer)) {
+      const cls = answerContainer.className || '';
+      if (/\bcorrect\b/.test(cls)) return 'correct';
+      if (/\berror\b/.test(cls))   return 'incorrect';
     }
-    // 2. action-bar-button.try-again visible
-    const tryAgainBtn = document.querySelector('.action-bar-button.try-again button, .action-bar-button.try-again');
-    if (tryAgainBtn && tryAgainBtn.offsetParent !== null) return 'incorrect';
-    // 3. cheer-button (post-correct animation)
-    const cheerBtn = document.querySelector('.cheer-button:not(.ng-hide):not(.sf-hidden)');
+
+    // 2. modeless-answer-dialog: tr.correct/incorrect (only when modal open).
+    const dialog = queryVisible('.modeless-answer-dialog');
+    if (dialog) {
+      if (dialog.querySelector('tr.incorrect')) return 'incorrect';
+      if (dialog.querySelector('tr.correct'))   return 'correct';
+    }
+
+    // 3. action-bar-button.try-again visible
+    const tryAgainBtn = queryVisible('.action-bar-button.try-again button, .action-bar-button.try-again');
+    if (tryAgainBtn) return 'incorrect';
+
+    // 4. cheer-button appears AFTER a correct answer (it's an ng-show
+    //    div, not a real button — hence isVisible() check, not tag check).
+    const cheerBtn = queryVisible('.cheer-button');
     if (cheerBtn) return 'correct';
-    // 4. paper-mode "Next question" button
-    const nextQBtn = document.querySelector('.next-question-button:not([disabled])');
-    if (nextQBtn) return 'correct';
-    // 5. SA navigation / information controls
-    const infoBtn = document.querySelector('.information-controls button:not([disabled]), #sa-navigation-controls button:not([disabled])');
-    if (infoBtn && infoBtn.offsetParent !== null) return 'correct';
-    // 6. #question-text disappeared → 'unknown' so the tick falls through
-    //    to ADVANCE instead of getting wedged in AWAIT_VERDICT.
+
+    // 5. paper-mode "Next question" button.
+    const nextQBtn = queryVisible('.next-question-button');
+    if (nextQBtn && isEnabled(nextQBtn)) return 'correct';
+
+    // 6. SA navigation / information controls.
+    const infoBtn = queryVisible('.information-controls button, #sa-navigation-controls button');
+    if (infoBtn && isEnabled(infoBtn)) return 'correct';
+
+    // 7. Enabled #continue-button present alone means we're sitting in the
+    //    post-verdict screen but we can't tell correct/wrong yet. Return
+    //    'unknown' so the watchdog can move us out of AWAIT_VERDICT.
+    const continueBtn = document.getElementById('continue-button');
+    if (continueBtn && isVisible(continueBtn) && isEnabled(continueBtn)) {
+      return 'unknown';
+    }
+
+    // 8. #question-text disappeared → unknown (next question loading or
+    //    list-complete). Helps the watchdog break us out of AWAIT_VERDICT.
     const qSpan = document.getElementById('question-text');
     if (qSpan && (qSpan.textContent || '').trim().length === 0) return 'unknown';
+
     return null;
   }
 
   // ── Clicks (Phase 2: more selectors, ng-disabled-aware) ───────────────────
 
   /** Click the "Next question" button to advance past the current question.
-   *  Primary selector `#continue-button` (verified in game-page HTML, label
-   *  "Next question"); fallbacks include paper-mode, correct feedback, SA
-   *  navigation, cheer-button, nav-bar-exit.
+   *  Phase 3 hardening:
+   *   - Every selector goes through safeClick() (isVisible + isEnabled).
+   *   - Primary `#continue-button` (verified in `Implement/(5) EP (8_4_2026
+   *     3：48：24 PM).html`: `<button class="nice-button ng-binding"
+   *     id=continue-button ng-click=self.continueButtonClicked()
+   *     ng-disabled=self.continueButtonDisabled>`).
+   *   - Re-query each iteration since EP's DOM can swap elements in/out
+   *     mid-animation; we don't trust a captured reference.
+   *   - When all selectors fail, fall through to the verbose text-match
+   *     loop, which prints the candidate's text into the console for the
+   *     user to copy into the road-map if they hit an unsupported layout.
+   *  Returns true when something was clicked.
    */
   function clickAdvanceButton() {
-    const advanceSelectors = [
-      '#continue-button:not([disabled])',
-      '.modeless-answer-dialog #continue-button:not([disabled])',
-      '.next-question-button:not([disabled])',
-      '#next-question:not([disabled])',
-      '#correct-button:not([disabled])',
-      '.correct-button:not([disabled])',
-      '.information-controls button:not([disabled])',
-      '#sa-navigation-controls button:not([disabled])',
-      '.sa-navigation-controls button:not([disabled])',
-      '.nav-bar-exit:not([disabled])',
-      '.game-action-bar button:not([disabled])',
-      '.cheer-button:not(.ng-hide):not(.sf-hidden)',
-      'button[data-action="continue"]:not([disabled])',
-      'button[data-action="next"]:not([disabled])',
+    // 1. ID-based / class-based selectors (highest signal).
+    const baseSelectors = [
+      '#continue-button',
+      '.modeless-answer-dialog #continue-button',
+      '.next-question-button',
+      '#next-question',
+      '#correct-button',
+      '.correct-button',
+      'button[name="continue"]',
+      'button[data-action="continue"]',
+      'button[data-action="next"]',
     ];
-    for (const sel of advanceSelectors) {
-      const btn = document.querySelector(sel);
-      if (btn && btn.offsetParent !== null && isButtonEnabled(btn)) {
-        console.log('[Hunter] Clicking advance:', sel);
-        btn.click();
-        return true;
+    for (const sel of baseSelectors) {
+      const btn = queryVisible(sel);
+      if (btn && isEnabled(btn)) {
+        console.log('[Hunter] Clicking advance:', sel, '·', (btn.textContent || '').trim().slice(0, 30));
+        if (safeClick(btn)) return true;
       }
     }
+
+    // 2. wider: any button inside the in-game action-bar / nav controls.
+    const fallbackSelectors = [
+      '.information-controls button',
+      '#sa-navigation-controls button',
+      '.sa-navigation-controls button',
+      '.nav-bar-exit',
+      '.game-action-bar button',
+      '.cheer-button',
+    ];
+    for (const sel of fallbackSelectors) {
+      const btn = queryVisible(sel);
+      if (btn && (btn.tagName !== 'BUTTON' || isEnabled(btn)) && isVisible(btn)) {
+        console.log('[Hunter] Clicking advance (fallback):', sel);
+        if (safeClick(btn)) return true;
+      }
+    }
+
+    // 3. Last resort: scan every visible button for content matching the
+    //    known "next / continue / done" set. Track non-matches so we can
+    //    tell the user what we DID see in the toast.
+    const seen = [];
     for (const btn of document.querySelectorAll('button')) {
-      if (btn.offsetParent === null || !isButtonEnabled(btn)) continue;
+      if (!isVisible(btn) || !isEnabled(btn)) continue;
       const text = (btn.textContent || '').trim().toLowerCase();
-      if (/^(next|continue|next question|ok|got it|done)$/i.test(text)) {
+      seen.push(text.slice(0, 30));
+      if (/^(next|continue|next question|ok|got it|done|done!)$/i.test(text)) {
         console.log('[Hunter] Clicking advance by text:', text);
-        btn.click();
-        return true;
+        if (safeClick(btn)) return true;
       }
     }
+    console.warn('[Hunter] No advance button found. Visible buttons:', seen.slice(0, 8));
     return false;
   }
 
   /** Click the dismiss / try-again / next button on a wrong-answer overlay.
+   *  Phase 3 hardening:
+   *   - In EP's actual flow the wrong-answer overlay REUSES the same
+   *     `#continue-button` that the correct-answer screen uses; in both
+   *     cases the button's text is "Next question" / "Try again" depending
+   *     on game mode. So the primary dismiss target IS the continue-button.
+   *   - All clicks go through safeClick() — isVisible() then isEnabled().
+   *   - We re-query each attempt because EP swaps the wrong overlay out
+   *     and in within ~300 ms; a cached reference could be a detached node.
+   *   - Always returns true/false cleanly so callers can chain.
    */
   function dismissWrongAnswer() {
-    const dismissSelectors = [
-      '#continue-button:not([disabled])',
-      '.modeless-answer-dialog #continue-button:not([disabled])',
-      '.action-bar-button.try-again button:not([disabled])',
-      '.action-bar-button.try-again:not(.ng-hide):not(.sf-hidden) button',
-      '.game-action-bar .action-bar-button.try-again button:not([disabled])',
-      '.feedback-button:not([disabled])',
-      '#sa-navigation-controls button:not([disabled])',
-      '.sa-navigation-controls button:not([disabled])',
-      '.game-action-bar .action-bar-button button:not([disabled])',
-      'button[name="continue"]:not([disabled])',
-      'button[data-action="continue"]:not([disabled])',
-      'button[data-action="next"]:not([disabled])',
+    // 1. Try the most common dismiss targets first.
+    const baseSelectors = [
+      '#continue-button',
+      '.modeless-answer-dialog #continue-button',
+      '.action-bar-button.try-again button',
+      '.action-bar-button.try-again',
+      '.game-action-bar .action-bar-button.try-again button',
+      '.feedback-button',
+      'button[name="continue"]',
+      'button[data-action="continue"]',
+      'button[data-action="next"]',
+      'button[data-action="got-it"]',
     ];
-    for (const sel of dismissSelectors) {
-      const btn = document.querySelector(sel);
-      if (btn && btn.offsetParent !== null && isButtonEnabled(btn)) {
-        console.log('[Hunter] Dismissing wrong answer via:', sel);
-        btn.click();
-        return true;
+    for (const sel of baseSelectors) {
+      const btn = queryVisible(sel);
+      if (btn && (btn.tagName !== 'BUTTON' || isEnabled(btn))) {
+        console.log('[Hunter] Dismissing wrong answer via:', sel, '·', (btn.textContent || '').trim().slice(0, 30));
+        if (safeClick(btn)) return true;
       }
     }
+
+    // 2. Wider fallbacks (any enabled action-bar / sa-nav button).
+    const fallbackSelectors = [
+      '.game-action-bar .action-bar-button button',
+      '#sa-navigation-controls button',
+      '.sa-navigation-controls button',
+    ];
+    for (const sel of fallbackSelectors) {
+      const btn = queryVisible(sel);
+      if (btn && isEnabled(btn)) {
+        console.log('[Hunter] Dismissing wrong answer (fallback):', sel);
+        if (safeClick(btn)) return true;
+      }
+    }
+
+    // 3. Last-resort: scan every visible button for any text matching.
+    //    Bumped the verb list to match EP's actual labels (verified across
+    //    files 1–4 in /Implement).
     for (const btn of document.querySelectorAll('button')) {
-      if (btn.offsetParent === null || !isButtonEnabled(btn)) continue;
+      if (!isVisible(btn) || !isEnabled(btn)) continue;
       const text = (btn.textContent || '').trim().toLowerCase();
-      if (/^(try again|continue|next|next question|ok|got it|retry|try it again)$/i.test(text)) {
+      if (/^(try again|continue|next|next question|ok|got it|retry|try it again|i was right|done)$/i.test(text)) {
         console.log('[Hunter] Dismissing wrong answer by text:', text);
-        btn.click();
-        return true;
+        if (safeClick(btn)) return true;
       }
     }
     return false;
   }
 
-  // ── Skip whole list (Phase 1 carry-over, improved in Phase 2) ─────────────
-
+  // ── Skip whole list (Phase 1 carry-over, hardened in Phase 3) ────────────────────────────
+  //  Phase 3 hardening:
+  //   - Uses isVisible() + safeClick() throughout so off-screen / disabled
+  //     items can never be clicked.
+  //   - Recognizes BOTH the sidebar task list (<li title="...">) and the
+  //     option-locked list (<li class="item ...">), mirroring autoNextList.
+  //   - Handles "no more tasks" gracefully with a clearer toast + doesn't
+  //     loop forever on the same selected item.
+  //   - activity-starter uses an explicit fallback chain (back-button by
+  //     aria-label, href, ng-click) so the back action always finds SOMETHING.
   function skipToNextTask() {
     const url = window.location.href.toLowerCase();
 
     if (url.includes('list-starter')) {
-      const items = document.querySelectorAll('#stats-parent .starter-panel .grouped-options > li.item');
-      if (items.length > 0) {
-        let foundCurrent = false;
-        let clicked = false;
-        for (const item of items) {
-          if (foundCurrent) {
-            item.click();
-            clicked = true;
-            break;
-          }
-          if (item.classList.contains('selected') ||
-              item.classList.contains('active')   ||
-              item.classList.contains('current')) {
-            foundCurrent = true;
-          }
+      // Two kinds of lists: sidebar (li[title]) and mode picker (li.item).
+      const itemSelectors = [
+        '#stats-parent li[title]',
+        '#left-controls-panel li[title]',
+        '#stats-parent .starter-panel li.item',
+        '#stats-parent .starter-panel .grouped-options > li.item',
+        '.grouped-options > li.item',
+      ];
+      let items = [];
+      for (const sel of itemSelectors) {
+        items = queryAllVisible(sel);
+        if (items.length > 0) break;
+      }
+
+      if (items.length === 0) {
+        // Nothing to click — try to nav back via breadcrumb.
+        const crumb = queryVisible('.breadcrumbs .crumb, .crumb-child');
+        if (crumb && safeClick(crumb)) {
+          showToast('⏭ Back to course view');
+        } else {
+          showToast('⚠️ No skip target on this screen');
         }
-        if (clicked) {
-          showToast('⏭ Skipped to next task');
-          console.log('[Hunter] Skipped sidebar item');
+        return;
+      }
+
+      let foundCurrent = false;
+      for (const item of items) {
+        if (foundCurrent) {
+          if (safeClick(item)) {
+            showToast('⏭ Skipped to next task');
+            console.log('[Hunter] Skipped sidebar item');
+          } else {
+            showToast('⚠️ Could not click next item');
+          }
           return;
         }
-        if (!foundCurrent) {
-          items[0].click();
+        if (item.classList.contains('selected') ||
+            item.classList.contains('active')   ||
+            item.classList.contains('current')  ||
+            item.getAttribute('aria-selected') === 'true') {
+          foundCurrent = true;
+        }
+      }
+
+      if (!foundCurrent) {
+        if (safeClick(items[0])) {
           showToast('⏭ Skipped to first task');
           console.log('[Hunter] Skipped to first sidebar item');
-          return;
         }
-        showToast('⏭ No more tasks in this list');
+        return;
       }
-      const crumb = document.querySelector('.breadcrumbs .crumb, .crumb-child');
-      if (crumb) {
-        crumb.click();
-        showToast('⏭ Back to course view');
-      }
+
+      // foundCurrent but no next-after: the list is exhausted.
+      showToast('🏁 No more tasks here — back to course view');
+      const crumb = queryVisible('.breadcrumbs .crumb, .crumb-child');
+      if (crumb) safeClick(crumb);
       return;
     }
 
     if (url.includes('game') || url.includes('activity-starter')) {
-      const backBtn = document.querySelector(
-        '#sa-navigation-controls .back-button, .back-button, [data-action="back"]'
-      );
-      if (backBtn) {
-        backBtn.click();
-        showToast('⏭ Going back to list');
-        return;
+      const backSelectors = [
+        '#sa-navigation-controls .back-button',
+        '#sa-navigation-controls [data-action="back"]',
+        '.navigation-controls button.back-button',
+        '.navigation-controls .back-button',
+        'button[aria-label="Back"]',
+        'button[aria-label*="back" i]',
+        '.back-button',
+        '[data-action="back"]',
+        'a[href*="list-starter"]',
+      ];
+      for (const sel of backSelectors) {
+        const btn = queryVisible(sel);
+        if (btn && safeClick(btn)) {
+          showToast('⏭ Going back to list');
+          return;
+        }
       }
-      const listLink = document.querySelector('a[href*="list-starter"], [ng-click*="list-starter"]');
-      if (listLink) {
-        listLink.click();
+      // ng-click link to list-starter.
+      const listLink = queryVisible('[ng-click*="list-starter"]');
+      if (listLink && safeClick(listLink)) {
         showToast('⏭ Navigating to list');
         return;
       }
@@ -765,25 +1105,97 @@
     showToast('⚠️ Not on a task page');
   }
 
-  // ── Main Hunter tick (Phase 2) ─────────────────────────────────────────────
+  // ── Main Hunter tick (Phase 3 hardened) ──────────────────────────────────
+  //   Phase 3 helpers used inside hunterTick:
+  //   - hunterDefer() schedules a callback; tracks handle in
+  //     hunterDelayedTimers so STOP / page-change can clear them.
+  //   - hunterSetState() transitions AND bumps hunterStateEntryMs so the
+  //     watchdog can detect staleness.
+  //   - hunterWatchdog() runs at the top of every tick — if Hunter has
+  //     been stuck in a state for stuckStateMs or idle for watchdogMs,
+  //     it force-resets to IDLE so we never spin forever.
+  //   - try/catch wraps the whole tick so a thrown bug in any helper
+  //     just resets the state — never wedges the loop.
+  // ──────────────────────────────────────────────────────────────────────────
+
+  function hunterDefer(fn, ms) {
+    const safe = clampMs(ms, CFG.hunter.safeMinDelayMs, CFG.hunter.safeMaxDelayMs);
+    const h = setTimeout(() => {
+      // Remove ourselves from the tracker, then run.
+      const i = hunterDelayedTimers.indexOf(h);
+      if (i !== -1) hunterDelayedTimers.splice(i, 1);
+      try { fn(); } catch (e) { console.warn('[Hunter] deferred fn threw', e); }
+    }, safe);
+    hunterDelayedTimers.push(h);
+    return h;
+  }
+
+  function hunterSetState(next) {
+    if (next === hunterState) return;
+    hunterPrevState    = hunterState;
+    hunterState        = next;
+    hunterStateEntryMs = Date.now();
+  }
+
+  function hunterWatchdog() {
+    if (!hunterEnabled) return;
+    const now = Date.now();
+    const stuck = now - hunterStateEntryMs;
+    if (stuck > CFG.hunter.stuckStateMs &&
+        hunterState !== 'IDLE' &&
+        !hunterHumanSuspended) {
+      console.warn('[Hunter] Watchdog: stuck in', hunterState, 'for',
+                   Math.floor(stuck/1000), 's — resetting to IDLE');
+      hunterSetState('IDLE');
+      lastFilled = '';
+      hunterAdvancing = false;
+      hunterNoAdvance = 0;
+      hunterQuestion = '';
+      showToast('🛟 Hunter unstuck (was in ' + hunterPrevState + ')');
+      updateHunterDebug();
+    }
+    if (now - hunterLastActiveMs > CFG.hunter.watchdogMs) {
+      console.warn('[Hunter] Global watchdog: no activity for',
+                   Math.floor((now - hunterLastActiveMs) / 1000), 's');
+      hunterLastActiveMs = now;
+      showToast('🛟 Hunter reset (global watchdog)');
+      hunterSetState('IDLE');
+    }
+  }
 
   function hunterTick() {
     if (!hunterEnabled || pageChanging) return;
 
-    const url = window.location.href.toLowerCase();
+    try {
+      // URL-change detection (SPA navigation).
+      const url = window.location.href.toLowerCase();
+      if (hunterLastPageUrl && hunterLastPageUrl !== url &&
+          !url.includes('list-starter') && !url.includes('game') &&
+          !url.includes('activity-starter')) {
+        hunterSetState('IDLE');
+        hunterQuestion  = '';
+        lastFilled      = '';
+        hunterAdvancing = false;
+        console.log('[Hunter] SPA nav away — reset to IDLE');
+      }
+      hunterLastPageUrl = url;
 
-    // Human-presence suspension.
-    if (hunterHumanSuspended) {
-      setDebug('👤 Human typing — Hunter idle');
-      return;
-    }
+      // Human-presence suspension.
+      if (hunterHumanSuspended) {
+        setDebug('👤 Human typing — Hunter idle');
+        return;
+      }
+
+      // Watchdog first so nothing below can loop forever.
+      hunterWatchdog();
+      hunterLastActiveMs = Date.now();
 
     // LIST_DONE short-circuit: detected at top, even mid-state.
     if (detectListDone() &&
         hunterState !== 'LIST_DONE' &&
         hunterState !== 'ADVANCE') {
       console.log('[Hunter] Detected list-complete state');
-      hunterState = 'LIST_DONE';
+      hunterSetState('LIST_DONE');
       updateHunterDebug();
     }
 
@@ -794,7 +1206,7 @@
         if (word) {
           hunterQuestion       = word;
           hunterQuestionStart  = Date.now();
-          hunterState          = 'DETECTED';
+          hunterSetState('DETECTED');
           hunterNoAdvance      = 0;
           console.log('[Hunter] DETECTED:', word);
           updateHunterDebug();
@@ -805,7 +1217,7 @@
       case 'DETECTED': {
         // Question visible, wait for tryFill() pipeline to start typing.
         if (filling) {
-          hunterState = 'TYPING';
+          hunterSetState('TYPING');
           console.log('[Hunter] TYPING');
           setDebug('⌨️ Typing answer…');
         }
@@ -814,10 +1226,13 @@
 
       case 'TYPING': {
         // Pipeline finished; transition to verdict polling after EP has
-        // had a moment to submit + grade.
+        // had a moment to submit + grade. Phase 3: deferred callback is
+        // tracked in hunterDelayedTimers (clamped duration) so we can
+        // cleanly cancel it on STOP / page-change.
         if (!filling) {
-          setTimeout(() => { hunterState = 'AWAIT_VERDICT'; },
-                     Math.max(120, CFG.typeCooldown * 1000));
+          hunterDefer(() => {
+            if (hunterState === 'TYPING') hunterSetState('AWAIT_VERDICT');
+          }, Math.max(120, CFG.typeCooldown * 1000));
         }
         break;
       }
@@ -831,31 +1246,30 @@
           hunterQuestionsAnswered++;
           console.log('[Hunter] Verdict: INCORRECT');
 
-          // ── Phase 2: errorPolicy branching ──
           const policy = CFG.hunter.errorPolicy;
           if (policy === 'learn' || policy === 'hybrid') {
-            try { learnFromError(); } catch (e) { console.warn('[Hunter] learnFromError threw', e); }
-            if (policy === 'hybrid') {
-              console.log('[Hunter] Hybrid: continuing to dismiss');
-            }
+            try { learnFromError(); }
+            catch (e) { console.warn('[Hunter] learnFromError threw', e); }
           }
 
           // Always dismiss the overlay. With 'learn'/'hybrid' the dismiss
-          // triggers a retry of the same question; the existing tryFill()
-          // will answer correctly because answerMap was just updated.
+          // triggers a retry of the same question; tryFill() will answer
+          // correctly because answerMap was just updated.
           dismissWrongAnswer();
-          setTimeout(() => { hunterState = 'ADVANCE'; }, CFG.hunter.advanceDelay);
+          hunterDefer(() => {
+            if (hunterState === 'AWAIT_VERDICT') hunterSetState('ADVANCE');
+          }, CFG.hunter.advanceDelay);
           updateHunterDebug();
         } else if (verdict === 'correct') {
           hunterScore.correct++;
           hunterQuestionsAnswered++;
           console.log('[Hunter] Verdict: CORRECT');
           setDebug('✅ Correct — advancing');
-          hunterState = 'ADVANCE';
+          hunterSetState('ADVANCE');
           updateHunterDebug();
         } else if (verdict === 'unknown') {
-          console.log('[Hunter] Verdict: UNKNOWN (question gone) — advancing');
-          hunterState = 'ADVANCE';
+          console.log('[Hunter] Verdict: UNKNOWN — advancing');
+          hunterSetState('ADVANCE');
         }
         break;
       }
@@ -869,41 +1283,53 @@
         if (advanced) {
           hunterNoAdvance = 0;
           hunterAdvancing = false;
+
           // Soft cap on questions per run.
           if (CFG.hunter.maxQuestionsPerRun > 0 &&
               hunterQuestionsAnswered >= CFG.hunter.maxQuestionsPerRun) {
-            console.log('[Hunter] Reached maxQuestionsPerRun — stopping');
             showToast('🕵️ Reached cap (' + CFG.hunter.maxQuestionsPerRun + ') — stopping');
             stopHunter();
             return;
           }
-          setTimeout(() => {
-            hunterState = 'IDLE';
-            hunterQuestion = '';
-            lastFilled = '';
-            updateHunterDebug();
+          hunterDefer(() => {
+            if (hunterState === 'ADVANCE') {
+              hunterSetState('IDLE');
+              hunterQuestion = '';
+              lastFilled = '';
+              updateHunterDebug();
+            }
           }, CFG.hunter.advanceDelay);
         } else {
           hunterNoAdvance++;
           if (detectListDone()) {
             hunterAdvancing = false;
-            hunterState = 'LIST_DONE';
+            hunterSetState('LIST_DONE');
             updateHunterDebug();
             break;
           }
-          setTimeout(() => {
+          // Hard cap on consecutive failed advance clicks.
+          if (hunterNoAdvance >= CFG.hunter.maxAdvanceAttempts) {
+            console.warn('[Hunter] Too many failed advance clicks — stopping');
+            showToast('🛑 Can’t find Next button (Hunter stopped)');
+            stopHunter();
+            return;
+          }
+          hunterDefer(() => {
             hunterAdvancing = false;
-            hunterState = 'IDLE';
-            hunterQuestion = '';
-            lastFilled = '';
+            if (hunterState === 'ADVANCE') {
+              hunterSetState('IDLE');
+              hunterQuestion = '';
+              lastFilled = '';
+            }
+            // Try again to click start buttons after many failures.
             if (hunterNoAdvance >= 5) {
               if (CFG.hunter.autoStart) {
                 if (url.includes('list-starter') && vocabUnlocked) {
-                  const sm = document.getElementById('start-button-main');
-                  if (sm && sm.offsetParent !== null) sm.click();
+                  const sm = queryVisible('#start-button-main');
+                  if (sm) safeClick(sm);
                 } else if (url.includes('activity-starter')) {
-                  const ss = document.getElementById('start-button-school');
-                  if (ss && ss.offsetParent !== null) ss.click();
+                  const ss = queryVisible('#start-button-school');
+                  if (ss) safeClick(ss);
                 }
               }
             }
@@ -918,12 +1344,12 @@
         showToast('🏁 List complete');
 
         if (CFG.hunter.autoContinueLists) {
-          setTimeout(() => {
+          hunterDefer(() => {
             if (!hunterEnabled) return;
             const moved = autoNextList();
             if (moved) {
-              setTimeout(() => {
-                hunterState     = 'IDLE';
+              hunterDefer(() => {
+                hunterSetState('IDLE');
                 hunterQuestion  = '';
                 hunterAdvancing = false;
                 updateHunterDebug();
@@ -945,18 +1371,21 @@
     // right page.
     if (CFG.hunter.autoStart && hunterState === 'IDLE') {
       if (url.includes('list-starter') && vocabUnlocked) {
-        const startMain = document.getElementById('start-button-main');
-        if (startMain && startMain.offsetParent !== null) {
-          console.log('[Hunter] Clicking start-button-main');
-          startMain.click();
-        }
+        const startMain = queryVisible('#start-button-main');
+        if (startMain) safeClick(startMain);
       } else if (url.includes('activity-starter')) {
-        const startSchool = document.getElementById('start-button-school');
-        if (startSchool && startSchool.offsetParent !== null) {
-          console.log('[Hunter] Clicking start-button-school');
-          startSchool.click();
-        }
+        const startSchool = queryVisible('#start-button-school');
+        if (startSchool) safeClick(startSchool);
       }
+    }
+    } catch (e) {
+      // A thrown bug somewhere inside the tick should NEVER wedge the loop.
+      console.warn('[Hunter] tick threw; resetting to IDLE:', e);
+      hunterSetState('IDLE');
+      hunterAdvancing = false;
+      hunterQuestion  = '';
+      lastFilled      = '';
+      updateHunterDebug();
     }
   }
 
@@ -984,10 +1413,20 @@
 
   /** Start Hunter Mode. Idempotent. */
   function startHunter() {
-    if (hunterTimer) clearInterval(hunterTimer);
+    // Cancel any prior instantiation cleanly (Phase 3 robustness).
+    if (hunterTimer) {
+      clearInterval(hunterTimer);
+      hunterTimer = null;
+    }
+    clearHunterDelayedTimers();
+    removeHumanListeners();
 
     hunterEnabled          = true;
     hunterState            = 'IDLE';
+    hunterPrevState        = 'IDLE';
+    hunterStateEntryMs     = Date.now();
+    hunterLastPageUrl      = window.location.href.toLowerCase();
+    hunterLastActiveMs     = Date.now();
     hunterQuestion         = '';
     hunterAdvancing        = false;
     hunterScore            = { correct: 0, incorrect: 0 };
@@ -1005,13 +1444,11 @@
     // Hydrate answerMap with previously-learned pairs from localStorage.
     loadLearnedAnswers();
 
-    // Wire human-presence listeners (capture phase, so we beat EP's handlers).
-    document.addEventListener('keydown', onHumanInteraction, true);
-    document.addEventListener('click',    onHumanInteraction, true);
-    document.addEventListener('input',    onHumanInteraction, true);
+    // Wire all human-presence listeners (capture phase, so we beat EP).
+    addHumanListeners();
 
     hunterTimer = setInterval(hunterTick, 500);
-    console.log('[Hunter] Started (Phase 2; errorPolicy=' + CFG.hunter.errorPolicy + ')');
+    console.log('[Hunter] Started (Phase 3 hardened; errorPolicy=' + CFG.hunter.errorPolicy + ')');
     showToast('🕵️ Hunter mode ON');
     setDebug('🕵️ Hunter ready');
 
@@ -1021,12 +1458,41 @@
     }
   }
 
+  /** Helper: clear every hunterDefer() timeout so no stale callbacks fire. */
+  function clearHunterDelayedTimers() {
+    for (const h of hunterDelayedTimers) {
+      try { clearTimeout(h); } catch (e) {}
+    }
+    hunterDelayedTimers = [];
+  }
+
+  /** Helper: attach all human-presence event listeners. */
+  function addHumanListeners() {
+    document.addEventListener('keydown', onHumanInteraction, true);
+    document.addEventListener('click',   onHumanInteraction, true);
+    document.addEventListener('input',   onHumanInteraction, true);
+    document.addEventListener('paste',   onHumanInteraction, true);
+    document.addEventListener('wheel',   onHumanInteraction, true);
+    document.addEventListener('scroll',  onHumanInteraction, true);
+  }
+
+  /** Helper: detach all human-presence listeners. Symmetric with addHumanListeners. */
+  function removeHumanListeners() {
+    document.removeEventListener('keydown', onHumanInteraction, true);
+    document.removeEventListener('click',   onHumanInteraction, true);
+    document.removeEventListener('input',   onHumanInteraction, true);
+    document.removeEventListener('paste',   onHumanInteraction, true);
+    document.removeEventListener('wheel',   onHumanInteraction, true);
+    document.removeEventListener('scroll',  onHumanInteraction, true);
+  }
+
   /** Stop Hunter Mode. Idempotent. */
   function stopHunter() {
     if (hunterTimer) {
       clearInterval(hunterTimer);
       hunterTimer = null;
     }
+    clearHunterDelayedTimers();
     hunterEnabled          = false;
     hunterState            = 'IDLE';
     hunterAdvancing        = false;
@@ -1037,9 +1503,7 @@
       clearTimeout(hunterHumanTimer);
       hunterHumanTimer = null;
     }
-    document.removeEventListener('keydown', onHumanInteraction, true);
-    document.removeEventListener('click',    onHumanInteraction, true);
-    document.removeEventListener('input',    onHumanInteraction, true);
+    removeHumanListeners();
 
     console.log('[Hunter] Stopped');
 
