@@ -427,7 +427,40 @@ Status legend: ✅ shipped on `main` · 🟡 Planned — not in current release
 | `addHumanListeners` / `removeHumanListeners` symmetric pair | **Done** (Phase 3) | ✅ yes — used by start/stop/STOP |
 | `clearHunterDelayedTimers` cleanup helper | **Done** (Phase 3) | ✅ yes |
 
-### Phase 4+ (planned, NOT shipped)
+### Phase 3 (robustness hardening — defensibility only, no new user behaviour)
+
+| Item | State | In `script.js`? |
+|---|---|---|
+| Universal DOM helpers (`isVisible`, `isEnabled`, `safeClick`, `queryVisible`, `queryAllVisible`, `clampMs`, `waitFor`, `isModalShown`) | **Done** (Phase 3) | ✅ yes |
+| Stuck-state watchdog (`stuckStateMs: 30000`) | **Done** (Phase 3) | ✅ yes — `hunterWatchdog()` |
+| Global inactivity watchdog (`watchdogMs: 120000`) | **Done** (Phase 3) | ✅ yes — `hunterWatchdog()` |
+| Tick try/catch (any thrown bug resets state) | **Done** (Phase 3) | ✅ yes |
+| `hunterDefer()` tracking + `clampMs()` on every setTimeout | **Done** (Phase 3) | ✅ yes |
+| Hard cap on failed advance clicks (`maxAdvanceAttempts: 5`) | **Done** (Phase 3) | ✅ yes |
+| Defensive localStorage parser (drops malformed entries) | **Done** (Phase 3) | ✅ yes — `loadLearnedAnswers()` |
+| `scrapeCorrectAnswer` hygiene (strips `Correct answer:`, hint trailers, length cap, prefix/suffix noise) | **Done** (Phase 3 → Phase 4 enhanced) | ✅ yes — `cleanScrapedAnswer()` |
+| URL-change observer (resets Hunter to IDLE on SPA nav away) | **Done** (Phase 3) | ✅ yes — top of `hunterTick()` |
+| `skipToNextTask` fallback chain (`<li title>`, `<li.item>`, breadcrumb, multiple back-button selectors) | **Done** (Phase 3) | ✅ yes |
+| `addHumanListeners` / `removeHumanListeners` symmetric pair | **Done** (Phase 3) | ✅ yes — used by start/stop/STOP |
+| `clearHunterDelayedTimers` cleanup helper | **Done** (Phase 3) | ✅ yes |
+
+### Phase 4 (usability + Learn-path hardening — landed on `main`)
+
+| Item | State | In `script.js`? |
+|---|---|---|
+| **Highest-priority Learn path: green-span reconstruction from `#users-answer-field`** (EP colors correct portions green `#0a0`) | **Done** (Phase 4) | ✅ yes — `scrapeCorrectAnswer` priority 2 |
+| **Highest-priority Continue path: click `#continue-button` ("Next question") FIRST after Learn** | **Done** (Phase 4) | ✅ yes — `clickContinueButton()` |
+| Modal-footer Continue fallback chain (`.modal-footer #continue-button`, `.modal-footer button.nice-button`) | **Done** (Phase 4) | ✅ yes — `clickContinueButton()` |
+| Learn toast: `🧠 Learned "...word..." · Next...` | **Done** (Phase 4) | ✅ yes |
+| Wrong toast (non-dismiss policy, fallback): `❌ Wrong · continuing...` | **Done** (Phase 4) | ✅ yes |
+| Human-presence detector (already in Phase 2; Phase 3 widened event types) | **Done** (Phase 2 / 3) | ✅ yes |
+| Stop button as one-shot kill-switch | **Done** (Phase 3) | ✅ yes — `#ep-stop` |
+| Smoother list navigation (dual selector chain + already-completed guard) | **Done** (Phase 3) | ✅ yes — `autoNextList` / `skipToNextTask` |
+| Smoother back-button chain on activity-starter / game pages | **Done** (Phase 3) | ✅ yes |
+| Progress badge + ETA (live rolling-avg format `⚡ N answered · ~Xs/q`) | **Partial** — `recordQuestionDuration` + `updateProgressBadge` + `fmtDuration` helpers added; UI element wiring pending (tool-cache issue prevented completing the `<div id="ep-badge">` insert in this turn). | 🟡 partial |
+| Between-list sleep toast (`💤 Sleeping Xs before next list…`) | **Partial** — `autoContinueLists` already awaits `betweenListDelay`; informational toast pending | 🟡 partial |
+
+### Phase 5+ (planned, NOT shipped)
 
 | Item | State |
 |---|---|
