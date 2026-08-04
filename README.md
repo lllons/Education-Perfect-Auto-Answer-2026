@@ -17,6 +17,10 @@ A fast userscript for automatically filling answers on Education Perfect using l
 
 </div>
 
+###### Note:
+``
+The implement folder contains the html layout of different areas around education perfect, used for AI context and personal reference. 
+``
 
 ### Branches
 
