@@ -36,6 +36,12 @@
     pollInterval   : 0,
     cooldown       : 0.5,
     typeCooldown   : 0.1,
+    // ── Hunter Mode ──
+    hunter: {
+      enabled        : false,   // master toggle
+      advanceDelay   : 600,     // ms after verdict before clicking Next
+      errorPolicy    : 'dismiss', // 'dismiss' | 'learn' (learn not yet implemented)
+    },
   };
  
   const SEL = {
@@ -59,8 +65,18 @@
   let panelUnlocked = false;
   let vocabUnlocked = false;
   let aiUnlocked = false;
+
+  // ── Hunter Mode state ──
+  let hunterEnabled = false;       // runtime toggle (defaults to CFG.hunter.enabled)
+  let hunterTimer   = null;        // interval for Hunter loop
+  let hunterState   = 'IDLE';      // IDLE | DETECTED | TYPING | AWAIT_VERDICT | ADVANCE
+  let hunterQuestion = '';         // last question word tracked by Hunter
+  let hunterAdvancing = false;     // guard to prevent double-advance
  
-  window.addEventListener('beforeunload', () => { pageChanging = true; });
+  window.addEventListener('beforeunload', () => {
+    pageChanging = true;
+    if (hunterEnabled) stopHunter();
+  });
  
   document.addEventListener('focusin', e => {
     const el = e.target;
@@ -264,8 +280,375 @@
     pollTimer = setInterval(() => { tryFill(); }, CFG.pollInterval);
   }
  
+  // ── Hunter Mode ════════════════════════════════════════════════════════════
+  //
+  //  Hunter Mode is an autonomous driver that sits on top of the existing
+  //  answer-fill pipeline. Once the current question is answered (correct or
+  //  wrong), it advances to the next one. If the answer was wrong, it dismisses
+  //  the error overlay first.
+  //
+  //  State machine: IDLE → DETECTED → TYPING → AWAIT_VERDICT → ADVANCE → IDLE
+  //
+  // ════════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Detect whether the current question has been answered (correct or wrong).
+   * Returns one of:
+   *   'correct'   – correct answer feedback is visible
+   *   'incorrect' – incorrect / wrong-answer feedback is visible
+   *   'unknown'  – question is still pending or no verdict yet
+   *   null       – no question visible at all
+   *
+   * Selectors derived from real EP DOM snapshots in Implement/*.html
+   */
+  function detectVerdict() {
+    // 1. Check for incorrect / wrong-answer signals (highest priority)
+    //    EP adds class 'incorrect' to history-bar items and shows feedback
+    const incorrectHistory = document.querySelector('.history-item.incorrect');
+    if (incorrectHistory) return 'incorrect';
+
+    // 2. In-game action bar with try-again button means wrong answer
+    const tryAgainBtn = document.querySelector('.action-bar-button.try-again button, .action-bar-button.try-again');
+    if (tryAgainBtn && tryAgainBtn.offsetParent !== null) return 'incorrect';
+
+    // 3. Check for correct signals
+    //    EP shows a 'correct-popup' or a 'correct-button' on correct answer
+    const correctPopup = document.querySelector('.correct-popup');
+    if (correctPopup && correctPopup.offsetParent !== null) return 'correct';
+
+    const correctBtn = document.querySelector('#correct-button, .correct-button');
+    if (correctBtn && correctBtn.offsetParent !== null) return 'correct';
+
+    // 4. Cheer button often appears after a correct answer
+    const cheerBtn = document.querySelector('.cheer-button:not(.ng-hide):not(.sf-hidden)');
+    if (cheerBtn) return 'correct';
+
+    // 5. Next-question button appearing means the current question is done
+    const nextQBtn = document.querySelector('.next-question-button:not([disabled]), #next-question:not([disabled])');
+    if (nextQBtn) return 'correct';
+
+    // 6. If the question text has disappeared or changed, the question is done
+    const questionSpan = document.getElementById('question-text');
+    if (questionSpan) {
+      const text = (questionSpan.textContent || '').trim();
+      if (text.length === 0) return 'unknown';
+    }
+
+    return null; // no verdict yet
+  }
+
+  /**
+   * Click the "Next" / "Continue" / "Try again" / "OK" button to advance
+   * past the current question. Tries multiple selectors from the EP DOM.
+   */
+  function clickAdvanceButton() {
+    // Priority list of selectors for the "move to next question" button
+    const advanceSelectors = [
+      // Next-question button (primary)
+      '.next-question-button:not([disabled])',
+      '#next-question:not([disabled])',
+      // Correct feedback: Continue / Next button
+      '#correct-button:not([disabled])',
+      '.correct-button:not([disabled])',
+      // Any button inside the sa-navigation-controls (EP's nav bar)
+      '#sa-navigation-controls button:not([disabled])',
+      '.sa-navigation-controls button:not([disabled])',
+      // Information controls (the "i" button that also acts as continue)
+      '.information-controls button:not([disabled])',
+      // Generic fallback: any enabled button in the action bar
+      '.game-action-bar button:not([disabled])',
+      // Cheer-button (post-correct animation)
+      '.cheer-button:not(.ng-hide):not(.sf-hidden)',
+    ];
+
+    for (const sel of advanceSelectors) {
+      const btn = document.querySelector(sel);
+      if (btn && btn.offsetParent !== null) {
+        console.log('[Hunter] Clicking advance:', sel);
+        btn.click();
+        return true;
+      }
+    }
+
+    // Last resort: try to find any visible button with matching text
+    const allButtons = document.querySelectorAll('button');
+    for (const btn of allButtons) {
+      if (btn.offsetParent === null) continue;
+      const text = (btn.textContent || '').trim().toLowerCase();
+      if (/^(next|continue|ok|got it|try again|correct|done)$/i.test(text)) {
+        console.log('[Hunter] Clicking advance by text:', text);
+        btn.click();
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Dismiss a wrong-answer / incorrect-feedback overlay and continue.
+   * This is the Dismiss & Continue policy (CFG.hunter.errorPolicy: 'dismiss').
+   * It looks for the try-again / continue / next button on the error overlay.
+   */
+  function dismissWrongAnswer() {
+    // Priority selectors for the dismiss button on a wrong-answer overlay
+    const dismissSelectors = [
+      // Try-again button (EP's classic action bar)
+      '.action-bar-button.try-again button:not([disabled])',
+      '.action-bar-button.try-again:not(.ng-hide):not(.sf-hidden) button',
+      // The game action bar's try-again
+      '.game-action-bar .action-bar-button.try-again button:not([disabled])',
+      // Generic continue / next in the feedback area
+      '.feedback-button:not([disabled])',
+      // SA navigation controls (next after wrong answer)
+      '#sa-navigation-controls button:not([disabled])',
+      '.sa-navigation-controls button:not([disabled])',
+      // The action bar's first enabled button (usually continue/next)
+      '.game-action-bar .action-bar-button button:not([disabled])',
+    ];
+
+    for (const sel of dismissSelectors) {
+      const btn = document.querySelector(sel);
+      if (btn && btn.offsetParent !== null) {
+        console.log('[Hunter] Dismissing wrong answer via:', sel);
+        btn.click();
+        return true;
+      }
+    }
+
+    // Fallback: find any visible button with matching text
+    const allButtons = document.querySelectorAll('button');
+    for (const btn of allButtons) {
+      if (btn.offsetParent === null) continue;
+      const text = (btn.textContent || '').trim().toLowerCase();
+      if (/^(try again|continue|next|ok|got it|retry)$/i.test(text)) {
+        console.log('[Hunter] Dismissing wrong answer by text:', text);
+        btn.click();
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Main Hunter tick — called every ~500ms when Hunter is active.
+   * Implements the IDLE → DETECTED → TYPING → AWAIT_VERDICT → ADVANCE → IDLE
+   * state machine.
+   */
+  function hunterTick() {
+    if (!hunterEnabled || pageChanging) return;
+
+    const url = window.location.href.toLowerCase();
+
+    // ── State machine ──
+    switch (hunterState) {
+
+      case 'IDLE':
+        // Wait for a question to appear
+        const word = getQuestionWord();
+        if (word) {
+          hunterQuestion = word;
+          hunterState = 'DETECTED';
+          console.log('[Hunter] Question detected:', word);
+          setDebug(`🕵️ Hunter: "${word.length > 20 ? word.slice(0,20)+'…' : word}"`);
+        }
+        break;
+
+      case 'DETECTED':
+        // The existing tryFill() pipeline handles typing. We just wait for
+        // filling to complete, then transition to AWAIT_VERDICT.
+        if (!filling) {
+          hunterState = 'AWAIT_VERDICT';
+          console.log('[Hunter] Waiting for verdict...');
+        }
+        break;
+
+      case 'AWAIT_VERDICT':
+        const verdict = detectVerdict();
+        if (verdict === 'incorrect') {
+          console.log('[Hunter] Verdict: INCORRECT — dismissing');
+          showToast('❌ Wrong — dismissing...');
+          setDebug('❌ Wrong — dismissing...');
+
+          // Dismiss the wrong-answer overlay
+          const dismissed = dismissWrongAnswer();
+          if (dismissed) {
+            // Wait for animations then advance
+            setTimeout(() => {
+              hunterState = 'ADVANCE';
+            }, CFG.hunter.advanceDelay);
+          } else {
+            // If we couldn't find a dismiss button, try advancing anyway
+            hunterState = 'ADVANCE';
+          }
+        } else if (verdict === 'correct') {
+          console.log('[Hunter] Verdict: CORRECT — advancing');
+          showToast('✅ Correct — advancing');
+          setDebug('✅ Correct — advancing');
+          hunterState = 'ADVANCE';
+        } else if (verdict === 'unknown') {
+          // Question text disappeared — question is done, just advance
+          hunterState = 'ADVANCE';
+        }
+        // null = no verdict yet, stay in AWAIT_VERDICT
+        break;
+
+      case 'ADVANCE':
+        if (hunterAdvancing) break;
+        hunterAdvancing = true;
+
+        console.log('[Hunter] Advancing to next question');
+        setDebug('⏩ Advancing...');
+
+        // First try to advance via the normal Next button
+        const advanced = clickAdvanceButton();
+
+        if (advanced) {
+          // Reset state for next question after a short delay
+          setTimeout(() => {
+            hunterState = 'IDLE';
+            hunterQuestion = '';
+            lastFilled = '';
+            hunterAdvancing = false;
+            setDebug('🕵️ Hunter ready');
+          }, CFG.hunter.advanceDelay);
+        } else {
+          // No advance button found — might be at the end of a list
+          // or the page transitioned. Reset and wait.
+          setTimeout(() => {
+            hunterState = 'IDLE';
+            hunterQuestion = '';
+            lastFilled = '';
+            hunterAdvancing = false;
+            setDebug('🕵️ Hunter (no advance btn — waiting)');
+          }, 1000);
+        }
+        break;
+    }
+
+    // ── List-starter auto-start (when Hunter is on) ──
+    if (url.includes('list-starter') && vocabUnlocked && auto) {
+      // If we're on the list page and there's a start button, click it
+      const startMain = document.getElementById('start-button-main');
+      if (startMain && startMain.offsetParent !== null) {
+        console.log('[Hunter] Clicking start-button-main');
+        startMain.click();
+      }
+    }
+
+    // ── Activity-starter auto-start ──
+    if (url.includes('activity-starter')) {
+      const startSchool = document.getElementById('start-button-school');
+      if (startSchool && startSchool.offsetParent !== null) {
+        console.log('[Hunter] Clicking start-button-school');
+        startSchool.click();
+      }
+    }
+  }
+
+  /**
+   * Start the Hunter loop. Called when the user toggles Hunter on.
+   */
+  function startHunter() {
+    if (hunterTimer) clearInterval(hunterTimer);
+    hunterEnabled = true;
+    hunterState = 'IDLE';
+    hunterQuestion = '';
+    hunterAdvancing = false;
+    hunterTimer = setInterval(hunterTick, 500);
+    console.log('[Hunter] Started');
+    showToast('🕵️ Hunter mode ON');
+    setDebug('🕵️ Hunter ready');
+  }
+
+  /**
+   * Stop the Hunter loop.
+   */
+  function stopHunter() {
+    if (hunterTimer) {
+      clearInterval(hunterTimer);
+      hunterTimer = null;
+    }
+    hunterEnabled = false;
+    hunterState = 'IDLE';
+    hunterAdvancing = false;
+    console.log('[Hunter] Stopped');
+    showToast('🕵️ Hunter mode OFF');
+    setDebug('');
+  }
+
+  /**
+   * Skip the current list / task and navigate to the next available task
+   * in the sidebar/content browser. This works by:
+   * 1. Finding the current task item in the list-starter's grouped-options
+   * 2. Clicking the next uncompleted item
+   * 3. If no next item, navigate back to the content browser
+   */
+  function skipToNextTask() {
+    const url = window.location.href.toLowerCase();
+
+    // If we're on a list-starter page, find the next task in the sidebar
+    if (url.includes('list-starter')) {
+      // The grouped-options contains all tasks in the current section
+      const items = document.querySelectorAll('#stats-parent .starter-panel .grouped-options > li.item');
+
+      if (items.length > 0) {
+        // Find the currently active/selected item
+        let foundCurrent = false;
+        for (const item of items) {
+          if (foundCurrent) {
+            // Click the next item
+            item.click();
+            showToast('⏭ Skipped to next task');
+            console.log('[Hunter] Skipped to next task');
+            return;
+          }
+          if (item.classList.contains('selected') || item.classList.contains('active')) {
+            foundCurrent = true;
+          }
+        }
+        // If no next item was found, try to go back to the browse view
+        showToast('⏭ No more tasks — going back');
+        console.log('[Hunter] No more tasks');
+      }
+
+      // Fallback: click the breadcrumb to go back
+      const backCrumb = document.querySelector('.breadcrumbs .crumb');
+      if (backCrumb) {
+        backCrumb.click();
+        showToast('⏭ Back to course view');
+      }
+      return;
+    }
+
+    // If we're in a game/activity, navigate back to the list starter
+    if (url.includes('game') || url.includes('activity-starter')) {
+      // Look for a back/close button or the sidebar navigation
+      const backBtn = document.querySelector('#sa-navigation-controls .back-button, .back-button, [data-action="back"]');
+      if (backBtn) {
+        backBtn.click();
+        showToast('⏭ Going back to list');
+        return;
+      }
+
+      // Fallback: try to find the list starter route
+      const listLink = document.querySelector('a[href*="list-starter"], [ng-click*="list-starter"]');
+      if (listLink) {
+        listLink.click();
+        showToast('⏭ Navigating to list');
+        return;
+      }
+
+      showToast('⚠️ No back button found');
+      return;
+    }
+
+    showToast('⚠️ Not on a task page');
+  }
+
   // ── UI ────────────────────────────────────────────────────────────────────
-  let panel, countEl, toggleBtn, debugEl, autoBtn, aiBtn;
+  let panel, countEl, toggleBtn, debugEl, autoBtn, aiBtn, hunterBtn, skipBtn;
  
   function setDebug(msg) { if (debugEl) debugEl.textContent = msg; }
  
@@ -284,10 +667,13 @@
       #ep-body{padding:14px}
       #ep-count{font-size:12px;margin-bottom:12px}
       #ep-count.ok{color:#4ad97d}#ep-count.warn{color:#ffb347}
-      #ep-btns{display:flex;gap:8px;margin-bottom:12px}
-      .ep-btn{flex:1;padding:8px;border:none;border-radius:8px;cursor:pointer;
-        background:#1b213a;color:#c4ccec;font-weight:600}
+      #ep-btns{display:flex;gap:5px;margin-bottom:8px;flex-wrap:wrap}
+      .ep-btn{flex:1;min-width:45px;padding:7px 4px;border:none;border-radius:8px;cursor:pointer;
+        background:#1b213a;color:#c4ccec;font-weight:600;font-size:11px;transition:all .15s}
       .ep-btn:hover{background:#28304d}
+      .ep-btn.hunter-active{background:#1b6d2a !important;box-shadow:0 0 8px rgba(74,217,125,.4)}
+      .ep-btn.skip-btn{background:#6d3f1b !important}
+      .ep-btn.skip-btn:hover{background:#8a5225 !important}
       .paused{background:#6d2222 !important}
       #ep-hint{font-size:11px;color:#68708f;line-height:1.5}
       #ep-debug{margin-top:10px;font-size:10px;color:#58607a;word-break:break-word}
@@ -315,17 +701,23 @@
           <button class="ep-btn" id="ep-toggle">⏸ Pause</button>
           <button class="ep-btn" id="ep-ai">AI</button>
         </div>
+        <div id="ep-btns2" style="display:flex;gap:5px;margin-bottom:8px">
+          <button class="ep-btn" id="ep-hunter">🕵️ Hunter</button>
+          <button class="ep-btn skip-btn" id="ep-skip">⏭ Skip</button>
+        </div>
         <div id="ep-hint">Select a task to activate.</div>
         <div id="ep-debug"></div>
       </div>
     `;
     document.body.appendChild(panel);
  
-    countEl   = panel.querySelector('#ep-count');
-    toggleBtn = panel.querySelector('#ep-toggle');
-    debugEl   = panel.querySelector('#ep-debug');
-    autoBtn   = panel.querySelector('#ep-auto');
-    aiBtn     = panel.querySelector('#ep-ai');
+    countEl    = panel.querySelector('#ep-count');
+    toggleBtn  = panel.querySelector('#ep-toggle');
+    debugEl    = panel.querySelector('#ep-debug');
+    autoBtn    = panel.querySelector('#ep-auto');
+    aiBtn      = panel.querySelector('#ep-ai');
+    hunterBtn  = panel.querySelector('#ep-hunter');
+    skipBtn    = panel.querySelector('#ep-skip');
  
     autoBtn.addEventListener('click', () => {
       showToast('Auto mode');
@@ -345,6 +737,25 @@
       showToast('🤖 AI mode');
       // Put your AI functionality here
     });
+
+    // ── Hunter Mode button ──
+    hunterBtn.addEventListener('click', () => {
+      if (hunterEnabled) {
+        stopHunter();
+        hunterBtn.classList.remove('hunter-active');
+        hunterBtn.textContent = '🕵️ Hunter';
+      } else {
+        startHunter();
+        hunterBtn.classList.add('hunter-active');
+        hunterBtn.textContent = '🕵️ ON';
+      }
+    });
+
+    // ── Skip button ──
+    skipBtn.addEventListener('click', () => {
+      skipToNextTask();
+    });
+
     makeDraggable(panel, panel.querySelector('#ep-handle'));
     updatePanelVisibility();
   }
@@ -399,18 +810,27 @@
       aiUnlocked = false;
     }
  
-    const loadBtn  = document.querySelector('#ep-load');
-    const pauseBtn = document.querySelector('#ep-toggle');
-    const countEl  = document.querySelector('#ep-count');
-    const aiBtn  = document.querySelector('#ep-ai');
-    const hintTxt = document.querySelector('#ep-hint');
+    const loadBtn   = document.querySelector('#ep-load');
+    const pauseBtn  = document.querySelector('#ep-toggle');
+    const countEl   = document.querySelector('#ep-count');
+    const aiBtn     = document.querySelector('#ep-ai');
+    const hunterBtn = document.querySelector('#ep-hunter');
+    const skipBtn   = document.querySelector('#ep-skip');
+    const btns2Row  = document.querySelector('#ep-btns2');
+    const hintTxt   = document.querySelector('#ep-hint');
     const debugTxt  = document.querySelector('#ep-debug');
  
-    if (loadBtn)  loadBtn.style.display  = vocabUnlocked ? '' : 'none';
-    if (pauseBtn) pauseBtn.style.display = vocabUnlocked ? '' : 'none';
-    if (countEl)  countEl.style.display  = vocabUnlocked ? '' : 'none';
+    if (loadBtn)   loadBtn.style.display   = vocabUnlocked ? '' : 'none';
+    if (pauseBtn)  pauseBtn.style.display  = vocabUnlocked ? '' : 'none';
+    if (countEl)   countEl.style.display   = vocabUnlocked ? '' : 'none';
  
-    if (aiBtn) aiBtn.style.display = aiUnlocked ? '' : 'none';
+    if (aiBtn)     aiBtn.style.display     = aiUnlocked ? '' : 'none';
+ 
+    // Show Hunter & Skip buttons on any task page (list-starter, activity-starter, or game)
+    const isTaskPage = url.includes('list-starter') || url.includes('activity-starter') || url.includes('game');
+    if (btns2Row)  btns2Row.style.display  = isTaskPage ? 'flex' : 'none';
+    if (hunterBtn) hunterBtn.style.display = isTaskPage ? '' : 'none';
+    if (skipBtn)   skipBtn.style.display   = isTaskPage ? '' : 'none';
  
     if (hintTxt) hintTxt.style.display = hints ? '' : 'none';
     if (vocabUnlocked) hintTxt.innerHTML = hintsList.list;
@@ -432,7 +852,9 @@
         }, 2000);
       }
  
-      if (url.includes('game')) {
+      // The existing game loop is now superseded by Hunter Mode when active.
+      // Keep it as a fallback for non-Hunter operation.
+      if (url.includes('game') && !hunterEnabled) {
         setInterval(() => {
           const bar = document.querySelector('.game-action-bar.sa-action-bar');
           console.log('[EP] Checking for action bar:', bar);
