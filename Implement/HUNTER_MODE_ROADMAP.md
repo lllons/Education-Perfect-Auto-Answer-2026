@@ -350,25 +350,30 @@ ready.
 
 ## 10. Status
 
+Status legend: ✅ shipped on `main` · 🟡 Planned — not in current release
+
 | Item | State | In `script.js`? |
 |---|---|---|
-| Question state machine | **Done** (v1) | ✅ yes |
-| Verdict detection | **Done** (v1) | ✅ yes |
-| Advance transition (`#continue-button` first) | **Done** (v1) | ✅ yes |
-| Dismiss policy (A) | **Done** (v1) | ✅ yes |
-| Skip-list button | **Done** (v1) | ✅ yes |
-| IDLE auto-start on starter screens | **Done** (v1) | ✅ yes |
-| Learn policy (B) | Planned | ❌ not yet |
-| End-of-list autopilot | Planned | ❌ not yet |
-| Human-presence detector | Planned | ❌ not yet |
-| Adaptive fuzzy threshold | Planned | ❌ not yet |
-| Adaptive typing speed | Planned | ❌ not yet |
-| Self-healing alternates / smartStrip | Planned | ❌ not yet |
-| Per-word confidence | Planned | ❌ not yet |
-| Telemetry opt-in + Export button | Planned | ❌ not yet (Export button removed) |
-| Visible kill-switch | Planned | ❌ not yet |
-| Progress badge (debug line only) | Partial — debug shows `🕵️ N✓ N✗ · Xm Ys · "word"`; no ETA yet | ✅ partial |
-| Daily list-id progress persistence | Planned | ❌ not yet |
+| Question state machine (IDLE → DETECTED → TYPING → AWAIT_VERDICT → ADVANCE → LIST_DONE) | **Done** (Phase 2) | ✅ yes |
+| Verdict detection | **Done** (Phase 1 + 2 hardening) | ✅ yes |
+| Advance transition (`#continue-button` first, ng-disabled-aware) | **Done** (Phase 2) | ✅ yes |
+| Dismiss policy (A) | **Done** (Phase 1) | ✅ yes — `errorPolicy: 'dismiss'` is a valid choice |
+| Learn policy (B) | **Done** (Phase 2) | ✅ yes — `errorPolicy: 'learn'`; reads `#correct-answer-field`, persists to `localStorage.ep.learned` with ring buffer |
+| Hybrid policy | **Done** (Phase 2) | ✅ yes — `errorPolicy: 'hybrid'` (default); tries learn, falls back to dismiss |
+| End-of-list detection | **Done** (Phase 2) | ✅ yes — `detectListDone()` |
+| End-of-list auto-continue | **Done** (Phase 2) | ✅ yes — `autoNextList()` driven by `CFG.hunter.autoContinueLists` |
+| Human-presence detector | **Done** (Phase 2) | ✅ yes — `onHumanInteraction()` listener, `CFG.hunter.humanPresenceWindow` ms pause |
+| Visible kill-switch STOP button | **Done** (Phase 2) | ✅ yes — `#ep-stop` button on the panel, dark red |
+| Skip-list button | **Done** (Phase 1) | ✅ yes — `#ep-skip` button |
+| IDLE auto-start on starter screens | **Done** (Phase 1) | ✅ yes — clicks `#start-button-main` / `#start-button-school` |
+| Progress badge (debug line only) | **Partial** — debug shows `🥷 N✓ N✗ · Xm Ys · STATE · "word"`; no ETA yet | ✅ partial |
+| Per-word confidence | Planned | 🟡 |
+| Adaptive fuzzy threshold | Planned | 🟡 |
+| Adaptive typing speed | Planned | 🟡 |
+| Self-healing alternates / smartStrip | Planned | 🟡 |
+| Telemetry opt-in + Export button | Planned | 🟡 |
+| Daily list-id progress persistence | Planned | 🟡 |
+| Detect in-game navigate to next-list | Planned | 🟡 |
 
 > Update this table when a new feature lands.
 
