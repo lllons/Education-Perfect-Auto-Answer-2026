@@ -351,14 +351,14 @@ once they survive a couple of full lists on a real EP account.
 
 | Item | State |
 |---|---|
-| Question state machine | Not started |
-| Verdict detection | Not started |
-| Advance transition | Not started |
-| Dismiss policy (A) | Not started |
-| Learn policy (B) | Not started |
-| End-of-list autopilot | Not started |
+| Question state machine | **Done** (v1) |
+| Verdict detection | **Done** (v1) |
+| Advance transition | **Done** (v1) |
+| Dismiss policy (A) | **Done** (v1) |
+| Learn policy (B) | **Done** (v2) |
+| End-of-list autopilot | **Done** (v2) |
 | Human-presence detector | Not started |
-| Progress badge | Not started |
+| Progress badge | **Done** (v2 — debug line shows score + timer) |
 | Per-word confidence | Not started |
 | Telemetry opt-in | Not started |
 

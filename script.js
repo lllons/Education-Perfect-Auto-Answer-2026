@@ -29,6 +29,9 @@
     activity: "Auto-selects or type the correct answer using AI.",
   }
  
+  const LEARNED_KEY = 'ep.learned'; // localStorage key for learned pairs
+  const MAX_LEARNED = 500;          // max learned pairs to keep
+
   const CFG = {
     fuzzyThreshold : 10,
     typeDelay      : 0,
@@ -40,7 +43,10 @@
     hunter: {
       enabled        : false,   // master toggle
       advanceDelay   : 600,     // ms after verdict before clicking Next
-      errorPolicy    : 'dismiss', // 'dismiss' | 'learn' (learn not yet implemented)
+      betweenListDelay: 1500,   // ms pause between lists
+      errorPolicy    : 'hybrid',  // 'dismiss' | 'learn' | 'hybrid' (learn+fallback)
+      autoContinueLists: false,  // walk straight into the next list
+      showProgress   : true,    // show progress badge in panel
     },
   };
  
@@ -69,9 +75,15 @@
   // ── Hunter Mode state ──
   let hunterEnabled = false;       // runtime toggle (defaults to CFG.hunter.enabled)
   let hunterTimer   = null;        // interval for Hunter loop
-  let hunterState   = 'IDLE';      // IDLE | DETECTED | TYPING | AWAIT_VERDICT | ADVANCE
+  let hunterState   = 'IDLE';      // IDLE | DETECTED | TYPING | AWAIT_VERDICT | ADVANCE | LIST_DONE
   let hunterQuestion = '';         // last question word tracked by Hunter
   let hunterAdvancing = false;     // guard to prevent double-advance
+  let hunterScore = { correct: 0, incorrect: 0, total: 0 }; // session stats
+  let hunterStartTime = 0;          // timestamp when Hunter was started
+  let hunterQuestionStart = 0;      // timestamp when current question was detected
+  let hunterLearned = null;         // {word, answer} from learn policy, or null
+  let hunterNoAdvanceCount = 0;     // consecutive ticks with no advance button
+  let hunterPreviousErrorPolicy = ''; // saved error policy when switching to hybrid
  
   window.addEventListener('beforeunload', () => {
     pageChanging = true;
@@ -302,32 +314,43 @@
    * Selectors derived from real EP DOM snapshots in Implement/*.html
    */
   function detectVerdict() {
-    // 1. Check for incorrect / wrong-answer signals (highest priority)
-    //    EP adds class 'incorrect' to history-bar items and shows feedback
+    // 1. Check for modeless-answer-dialog (wrong/correct answer overlay)
+    //    EP shows a modal dialog with #correct-answer-field and #continue-button
+    const dialog = document.querySelector('.modeless-answer-dialog');
+    if (dialog && dialog.offsetParent !== null) {
+      // Check if the dialog shows incorrect (red) or correct (green) answer
+      const incorrectRow = dialog.querySelector('tr.incorrect');
+      const correctRow = dialog.querySelector('tr.correct');
+      if (incorrectRow && incorrectRow.offsetParent !== null) return 'incorrect';
+      if (correctRow && correctRow.offsetParent !== null) return 'correct';
+    }
+
+    // 2. Check for incorrect / wrong-answer signals (highest priority)
+    //    EP adds class 'incorrect' to history-bar items
     const incorrectHistory = document.querySelector('.history-item.incorrect');
     if (incorrectHistory) return 'incorrect';
 
-    // 2. In-game action bar with try-again button means wrong answer
+    // 3. In-game action bar with try-again button means wrong answer
     const tryAgainBtn = document.querySelector('.action-bar-button.try-again button, .action-bar-button.try-again');
     if (tryAgainBtn && tryAgainBtn.offsetParent !== null) return 'incorrect';
 
-    // 3. Check for correct signals
+    // 4. Check for correct signals
     //    EP shows a 'correct-popup' or a 'correct-button' on correct answer
-    const correctPopup = document.querySelector('.correct-popup');
+    const correctPopup = document.querySelector('#correct-popup, .correct-popup');
     if (correctPopup && correctPopup.offsetParent !== null) return 'correct';
 
     const correctBtn = document.querySelector('#correct-button, .correct-button');
     if (correctBtn && correctBtn.offsetParent !== null) return 'correct';
 
-    // 4. Cheer button often appears after a correct answer
+    // 5. Cheer button often appears after a correct answer
     const cheerBtn = document.querySelector('.cheer-button:not(.ng-hide):not(.sf-hidden)');
     if (cheerBtn) return 'correct';
 
-    // 5. Next-question button appearing means the current question is done
+    // 6. Next-question button appearing means the current question is done
     const nextQBtn = document.querySelector('.next-question-button:not([disabled]), #next-question:not([disabled])');
     if (nextQBtn) return 'correct';
 
-    // 6. If the question text has disappeared or changed, the question is done
+    // 7. If the question text has disappeared or changed, the question is done
     const questionSpan = document.getElementById('question-text');
     if (questionSpan) {
       const text = (questionSpan.textContent || '').trim();
@@ -341,10 +364,115 @@
    * Click the "Next" / "Continue" / "Try again" / "OK" button to advance
    * past the current question. Tries multiple selectors from the EP DOM.
    */
+  /**
+   * Scrape the correct answer from the modeless-answer-dialog overlay.
+   * EP reveals the correct answer in a table row with id="correct-answer-field".
+   * Returns the answer text, or null if not found.
+   */
+  function scrapeCorrectAnswer() {
+    const field = document.getElementById('correct-answer-field');
+    if (field) {
+      const text = (field.textContent || '').trim();
+      if (text && text.length > 0) {
+        console.log('[Hunter] Scraped correct answer:', text);
+        return text;
+      }
+    }
+    // Fallback: look for it in the dialog
+    const dialog = document.querySelector('.modeless-answer-dialog');
+    if (dialog) {
+      const field2 = dialog.querySelector('#correct-answer-field, .field.native-font');
+      if (field2) {
+        const text = (field2.textContent || '').trim();
+        if (text && text.length > 0) {
+          console.log('[Hunter] Scraped correct answer (fallback):', text);
+          return text;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Learn from a wrong answer by scraping the correct answer from the overlay
+   * and updating the answerMap. This is the Learn from Error policy (Policy B).
+   * Returns the learned answer text, or null if nothing was learned.
+   */
+  function learnFromError() {
+    const correctAnswer = scrapeCorrectAnswer();
+    if (!correctAnswer || !hunterQuestion) {
+      console.log('[Hunter] Cannot learn - no correct answer or question');
+      return null;
+    }
+
+    const q = norm(hunterQuestion);
+    const a = stripAlts(correctAnswer.trim());
+    if (!q || !a) return null;
+
+    // Update answerMap
+    answerMap[q] = a;
+    answerMap[norm(a)] = hunterQuestion; // bidirectional
+
+    // Persist to localStorage
+    try {
+      let learned = {};
+      const stored = localStorage.getItem(LEARNED_KEY);
+      if (stored) {
+        try { learned = JSON.parse(stored); } catch(e) {}
+      }
+      learned[q] = a;
+      // Keep ring buffer
+      const keys = Object.keys(learned);
+      if (keys.length > MAX_LEARNED) {
+        const toDelete = keys.slice(0, keys.length - MAX_LEARNED);
+        for (const k of toDelete) delete learned[k];
+      }
+      localStorage.setItem(LEARNED_KEY, JSON.stringify(learned));
+      console.log('[Hunter] Learned:', q, '→', a);
+    } catch (e) {
+      console.warn('[Hunter] Failed to persist learned pair:', e);
+    }
+
+    showToast(`🧠 Learned: "${hunterQuestion}" → "${a}"`);
+    setDebug(`🧠 Learned: "${hunterQuestion}" → "${a}"`);
+    return a;
+  }
+
+  /**
+   * Load previously learned pairs from localStorage into answerMap.
+   */
+  function loadLearnedAnswers() {
+    try {
+      const stored = localStorage.getItem(LEARNED_KEY);
+      if (stored) {
+        const learned = JSON.parse(stored);
+        let count = 0;
+        for (const [q, a] of Object.entries(learned)) {
+          if (!answerMap[q]) {
+            answerMap[q] = a;
+            count++;
+          }
+        }
+        if (count > 0) {
+          console.log('[EP] Loaded', count, 'learned pairs from localStorage');
+        }
+      }
+    } catch (e) {
+      console.warn('[EP] Failed to load learned pairs:', e);
+    }
+  }
+
+  /**
+   * Click the "Next" / "Continue" / "Try again" / "OK" button to advance
+   * past the current question. Tries multiple selectors from the EP DOM.
+   */
   function clickAdvanceButton() {
     // Priority list of selectors for the "move to next question" button
     const advanceSelectors = [
-      // Next-question button (primary)
+      // Continue button inside the modeless-answer-dialog (primary)
+      '#continue-button:not([disabled])',
+      '.modeless-answer-dialog #continue-button:not([disabled])',
+      // Next-question button (paper mode)
       '.next-question-button:not([disabled])',
       '#next-question:not([disabled])',
       // Correct feedback: Continue / Next button
@@ -359,6 +487,8 @@
       '.game-action-bar button:not([disabled])',
       // Cheer-button (post-correct animation)
       '.cheer-button:not(.ng-hide):not(.sf-hidden)',
+      // The nav-bar-exit (back to list)
+      '.nav-bar-exit:not([disabled])',
     ];
 
     for (const sel of advanceSelectors) {
@@ -386,6 +516,51 @@
   }
 
   /**
+   * Detect whether we've reached the end of a list (list-complete screen).
+   * Returns true if the list-starter page is showing with completed stats.
+   */
+  function detectListDone() {
+    const url = window.location.href.toLowerCase();
+    // If we're back on the list-starter page and the start button is visible
+    // with a "Continue" label, the list is done.
+    if (url.includes('list-starter')) {
+      const startLabel = document.getElementById('start-button-main-label');
+      if (startLabel) {
+        const text = (startLabel.textContent || '').trim().toLowerCase();
+        if (text.includes('continue') || text.includes('start')) {
+          return true;
+        }
+      }
+      // Also check if it's the statistics page
+      if (url.includes('list-statistics')) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Auto-navigate to the next list when the current one finishes.
+   * Clicks on the next uncompleted item in the sidebar.
+   */
+  function autoNextList() {
+    const items = document.querySelectorAll('#left-controls-panel .grouped-options > li.item');
+    if (items.length > 0) {
+      let foundCurrent = false;
+      for (const item of items) {
+        if (foundCurrent) {
+          console.log('[Hunter] Auto-navigating to next list');
+          item.click();
+          showToast('⏩ Auto-next list');
+          return true;
+        }
+        if (item.classList.contains('selected') || item.classList.contains('active')) {
+          foundCurrent = true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
    * Dismiss a wrong-answer / incorrect-feedback overlay and continue.
    * This is the Dismiss & Continue policy (CFG.hunter.errorPolicy: 'dismiss').
    * It looks for the try-again / continue / next button on the error overlay.
@@ -393,6 +568,9 @@
   function dismissWrongAnswer() {
     // Priority selectors for the dismiss button on a wrong-answer overlay
     const dismissSelectors = [
+      // Continue button in the modeless-answer-dialog (primary for learn/dismiss)
+      '#continue-button:not([disabled])',
+      '.modeless-answer-dialog #continue-button:not([disabled])',
       // Try-again button (EP's classic action bar)
       '.action-bar-button.try-again button:not([disabled])',
       '.action-bar-button.try-again:not(.ng-hide):not(.sf-hidden) button',
@@ -441,17 +619,63 @@
 
     const url = window.location.href.toLowerCase();
 
+    // ── Check for list-done state ──
+    if (detectListDone()) {
+      if (hunterState !== 'LIST_DONE') {
+        hunterState = 'LIST_DONE';
+        console.log('[Hunter] List completed!');
+        showToast('🏁 List complete!');
+        setDebug('🏁 List done');
+
+        // Update progress
+        hunterScore.total = hunterScore.correct + hunterScore.incorrect;
+
+        // Auto-continue to next list if configured
+        if (CFG.hunter.autoContinueLists) {
+          setTimeout(() => {
+            const next = autoNextList();
+            if (next) {
+              hunterState = 'IDLE';
+            } else {
+              showToast('🏁 No more lists — Hunter stopped');
+              stopHunter();
+              if (hunterBtn) {
+                hunterBtn.classList.remove('hunter-active');
+                hunterBtn.textContent = '🕵️ Hunter';
+              }
+            }
+          }, CFG.hunter.betweenListDelay);
+        } else {
+          // Auto-restart the current list if start button is available
+          setTimeout(() => {
+            const startMain = document.getElementById('start-button-main');
+            if (startMain && startMain.offsetParent !== null) {
+              startMain.click();
+              hunterState = 'IDLE';
+            }
+          }, 1000);
+        }
+      }
+      return; // Skip the rest of the tick while in LIST_DONE
+    }
+
     // ── State machine ──
     switch (hunterState) {
 
       case 'IDLE':
+      case 'LIST_DONE':
+        // Reset for next question
+        hunterQuestionStart = Date.now();
+        hunterLearned = null;
+
         // Wait for a question to appear
         const word = getQuestionWord();
         if (word) {
           hunterQuestion = word;
           hunterState = 'DETECTED';
+          hunterNoAdvanceCount = 0;
           console.log('[Hunter] Question detected:', word);
-          setDebug(`🕵️ Hunter: "${word.length > 20 ? word.slice(0,20)+'…' : word}"`);
+          updateHunterDebug();
         }
         break;
 
@@ -461,32 +685,57 @@
         if (!filling) {
           hunterState = 'AWAIT_VERDICT';
           console.log('[Hunter] Waiting for verdict...');
+          setDebug('⏳ Waiting for verdict...');
         }
         break;
 
       case 'AWAIT_VERDICT':
         const verdict = detectVerdict();
         if (verdict === 'incorrect') {
-          console.log('[Hunter] Verdict: INCORRECT — dismissing');
-          showToast('❌ Wrong — dismissing...');
-          setDebug('❌ Wrong — dismissing...');
+          hunterScore.incorrect++;
+          hunterScore.total++;
 
-          // Dismiss the wrong-answer overlay
+          console.log('[Hunter] Verdict: INCORRECT');
+
+          // ── Learn from Error (Policy B) ──
+          if (CFG.hunter.errorPolicy === 'learn' || CFG.hunter.errorPolicy === 'hybrid') {
+            const learned = learnFromError();
+            if (learned) {
+              hunterLearned = { word: hunterQuestion, answer: learned };
+              showToast(`🧠 Learned: "${hunterQuestion}" → "${learned}"`);
+              setDebug(`🧠 Learned: "${hunterQuestion}" → "${learned}"`);
+            } else if (CFG.hunter.errorPolicy === 'hybrid') {
+              // Hybrid: if we couldn't learn, fall back to dismiss
+              console.log('[Hunter] Hybrid: could not learn, falling back to dismiss');
+            }
+          }
+
+          // ── Dismiss (always, even after learning) ──
+          showToast('❌ Wrong — continuing...');
+          setDebug('❌ Wrong — continuing...');
+
           const dismissed = dismissWrongAnswer();
           if (dismissed) {
-            // Wait for animations then advance
             setTimeout(() => {
               hunterState = 'ADVANCE';
             }, CFG.hunter.advanceDelay);
           } else {
-            // If we couldn't find a dismiss button, try advancing anyway
             hunterState = 'ADVANCE';
           }
+
+          updateHunterDebug();
+
         } else if (verdict === 'correct') {
+          hunterScore.correct++;
+          hunterScore.total++;
+
           console.log('[Hunter] Verdict: CORRECT — advancing');
           showToast('✅ Correct — advancing');
           setDebug('✅ Correct — advancing');
           hunterState = 'ADVANCE';
+
+          updateHunterDebug();
+
         } else if (verdict === 'unknown') {
           // Question text disappeared — question is done, just advance
           hunterState = 'ADVANCE';
@@ -501,27 +750,34 @@
         console.log('[Hunter] Advancing to next question');
         setDebug('⏩ Advancing...');
 
-        // First try to advance via the normal Next button
         const advanced = clickAdvanceButton();
 
         if (advanced) {
-          // Reset state for next question after a short delay
+          hunterNoAdvanceCount = 0;
           setTimeout(() => {
             hunterState = 'IDLE';
             hunterQuestion = '';
             lastFilled = '';
             hunterAdvancing = false;
-            setDebug('🕵️ Hunter ready');
+            updateHunterDebug();
           }, CFG.hunter.advanceDelay);
         } else {
-          // No advance button found — might be at the end of a list
-          // or the page transitioned. Reset and wait.
+          hunterNoAdvanceCount++;
           setTimeout(() => {
             hunterState = 'IDLE';
             hunterQuestion = '';
             lastFilled = '';
             hunterAdvancing = false;
-            setDebug('🕵️ Hunter (no advance btn — waiting)');
+            if (hunterNoAdvanceCount > 5) {
+              setDebug('🕵️ Stuck? Try clicking start...');
+              // Try clicking the start button
+              const startMain = document.getElementById('start-button-main');
+              if (startMain && startMain.offsetParent !== null) {
+                startMain.click();
+              }
+            } else {
+              setDebug('🕵️ Hunter (waiting... )');
+            }
           }, 1000);
         }
         break;
@@ -529,7 +785,6 @@
 
     // ── List-starter auto-start (when Hunter is on) ──
     if (url.includes('list-starter') && vocabUnlocked && auto) {
-      // If we're on the list page and there's a start button, click it
       const startMain = document.getElementById('start-button-main');
       if (startMain && startMain.offsetParent !== null) {
         console.log('[Hunter] Clicking start-button-main');
@@ -548,14 +803,42 @@
   }
 
   /**
+   * Update the debug line with hunter progress info.
+   */
+  function updateHunterDebug() {
+    if (!debugEl) return;
+    const elapsed = hunterStartTime ? Math.floor((Date.now() - hunterStartTime) / 1000) : 0;
+    const mins = Math.floor(elapsed / 60);
+    const secs = elapsed % 60;
+
+    let msg = `🕵️ ${hunterScore.correct}✓ ${hunterScore.incorrect}✗`;
+    if (elapsed > 0) msg += ` · ${mins}m${secs}s`;
+    if (hunterQuestion) {
+      const short = hunterQuestion.length > 15 ? hunterQuestion.slice(0, 15) + '…' : hunterQuestion;
+      msg += ` · "${short}"`;
+    }
+    setDebug(msg);
+  }
+
+  /**
    * Start the Hunter loop. Called when the user toggles Hunter on.
    */
   function startHunter() {
     if (hunterTimer) clearInterval(hunterTimer);
+
+    // Load previously learned pairs from localStorage
+    loadLearnedAnswers();
+
     hunterEnabled = true;
     hunterState = 'IDLE';
     hunterQuestion = '';
     hunterAdvancing = false;
+    hunterScore = { correct: 0, incorrect: 0, total: 0 };
+    hunterStartTime = Date.now();
+    hunterQuestionStart = 0;
+    hunterLearned = null;
+    hunterNoAdvanceCount = 0;
+
     hunterTimer = setInterval(hunterTick, 500);
     console.log('[Hunter] Started');
     showToast('🕵️ Hunter mode ON');
@@ -573,8 +856,21 @@
     hunterEnabled = false;
     hunterState = 'IDLE';
     hunterAdvancing = false;
+    hunterQuestion = '';
+    hunterLearned = null;
     console.log('[Hunter] Stopped');
-    showToast('🕵️ Hunter mode OFF');
+
+    // Show session summary
+    const total = hunterScore.correct + hunterScore.incorrect;
+    if (total > 0) {
+      const pct = total > 0 ? Math.round((hunterScore.correct / total) * 100) : 0;
+      const elapsed = Math.floor((Date.now() - hunterStartTime) / 1000);
+      const mins = Math.floor(elapsed / 60);
+      const secs = elapsed % 60;
+      showToast(`🕵️ Session: ${hunterScore.correct}/${total} (${pct}%) · ${mins}m${secs}s`);
+    } else {
+      showToast('🕵️ Hunter mode OFF');
+    }
     setDebug('');
   }
 
