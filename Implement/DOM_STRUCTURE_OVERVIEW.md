@@ -1,62 +1,104 @@
 # DOM Structure Overview — Education Perfect
 
-> Extracted from the three HTML snapshots in `Implement/` (captured August 4, 2026).
-> These are **full-page SingleFile** exports of the real EP website, so every
-> element is real — no mocking, no guessing.
+> Extracted from the eight HTML snapshots in `Implement/` (captured August 4–5,
+> 2026). These are **full-page SingleFile** exports of the real EP website, so
+> every element is real — no mocking, no guessing.
 >
-> **Files:**
-> - `EP (8_4_2026 3：48：05 PM).html` — **Wrong-answer / list-starter view** (page URL: `/app/French/1373/187197/list-starter`)
-> - `(5) EP (8_4_2026 3：48：24 PM).html` — **In-game activity / pre-task screen** (page URL: `/app/French/1373/187197/game?mode=1`)
-> - `(5) EP (8_4_2026 3：53：53 PM).html` — **List / course-browser view** (task grid)
+> **Files (newest last):**
+> - `Implement/EP (8_4_2026 3：48：05 PM).html` — Wrong-answer / list-starter view
+> - `Implement/(5) EP (8_4_2026 3：48：24 PM).html` — In-game activity / pre-task screen
+> - `Implement/(5) EP (8_4_2026 3：53：53 PM).html` — Course browser (Tailwind/React)
+> - `Implement/EP (8_5_2026 8：53：36 AM).html` — Pure Tailwind/React shell (no quiz mounted)
+> - `Implement/EP (8_5_2026 8：54：05 AM).html` — Pure Tailwind/React shell
+> - `Implement/EP (8_5_2026 8：54：21 AM).html` — Pure Tailwind/React shell
+> - `Implement/EP (8_5_2026 8：54：41 AM).html` — **Modern hybrid list-starter** (Tailwind shell + Angular slot)
+> - `Implement/(5) EP (8_5_2026 8：55：00 AM).html` — In-game activity (pre-answer state)
 
 ---
 
 ## Table of Contents
 
 1. [Page Routes & AngularJS Patterns](#1-page-routes--angularjs-patterns)
-2. [File 1 — List Starter (Wrong-Answer State)](#2-file-1--list-starter-wrong-answer-state)
-3. [File 2 — In-Game Activity (Game Question)](#3-file-2--in-game-activity-game-question)
-4. [File 3 — Course Browser (List View)](#4-file-3--course-browser-list-view)
-5. [Key Selectors for Scripting](#5-key-selectors-for-scripting)
-6. [AngularJS Scopes & Controllers](#6-angularjs-scopes--controllers)
-7. [Navigation Flow](#7-navigation-flow)
-8. [Appendix: Full Class & ID Reference](#8-appendix-full-class--id-reference)
+2. [General Layout — AngularJS vs Tailwind/React](#2-general-layout--angularjs-vs-tailwindreact)
+3. [File 1 / Hybrid list-starter — primary DOM reference](#3-file-1--hybrid-list-starter--primary-dom-reference)
+4. [File 2 / In-game activity — primary DOM reference](#4-file-2--in-game-activity--primary-dom-reference)
+5. [Tailwind/React shell (Files 3, 5–7)](#5-tailwindreact-shell-files-3-5-7)
+6. [Key Selectors for Scripting (Hunter Mode v1)](#6-key-selectors-for-scripting-hunter-mode-v1)
+7. [AngularJS Scopes & Controllers](#7-angularjs-scopes--controllers)
+8. [Navigation Flow](#8-navigation-flow)
+9. [Appendix: Full Class & ID Reference](#9-appendix-full-class--id-reference)
 
 ---
 
 ## 1. Page Routes & AngularJS Patterns
 
-EP is an **AngularJS** single-page application (Angular 1.x) with a **micro-frontend** shell
-(`single-spa`). Key routes:
+EP is an **AngularJS 1.x** single-page application wrapped in a **micro-frontend
+shell** (`single-spa`). Currently two coexisting UIs are in the wild:
 
-| Route pattern | Description | File |
+| Era | Module | Where |
 |---|---|---|
-| `/app/{subject}/{id}/{listId}/list-starter` | Vocabulary list — shows pairs grid, modes, start button | File 1 |
-| `/app/{subject}/{id}/{listId}/game?mode=1` | Active game — question, answer input, action bar, scoreboard | File 2 |
-| `/app/{subject}/{id}/{listId}/activity-starter` | Activity pre-task screen (not directly captured) | — |
-| `/browse/...` | Course/lesson browser (tailwind-based new UI) | File 3 |
+| Legacy | AngularJS components (`starter.*`, `self.*`) | The vocab list + game flow |
+| Modern | React micro-frontend (`mfeLearnerExperience`) wrapping Tailwind UI | The course browser / breadcrumb |
+| Hybrid | React shell **+** AngularJS slot mounted inside | The modern list-starter (file 7) |
+
+Key routes:
+
+| Route pattern | Description | Reference file |
+|---|---|---|
+| `/app/{subject}/{id}/{listId}/list-starter` | Vocabulary list — pairs grid, modes, start button | File 1, File 7 |
+| `/app/{subject}/{id}/{listId}/game?mode=1` | Active game — question, answer input, action bar | File 2, File 8 |
+| `/app/{subject}/{id}/{listId}/activity-starter` | Activity pre-task screen | (verifiable via `#start-button-school`) |
+| `/app/{subject}/{id}/{listId}/browse` | Course/lesson browser | File 3 |
+| `/app/{subject}/{id}/{listId}/...` no Angular slot | Tailwind/React shell, no quiz | Files 4–6 |
 
 **AngularJS conventions visible:**
 - `ng-scope` — every AngularJS component
 - `ng-isolate-scope` — directive/component with isolated scope
-- `ng-repeat`, `ng-if`, `ng-show`, `ng-hide`, `ng-class`, `ng-click`, `ng-disabled`, `ng-model`, `ng-bind`
-- `ng-hide` / `sf-hidden` — both used for hiding elements (Angular's `ng-hide` + `sf-hidden` from SingleFile)
-- `ng-class="{correct: ..., incorrect: ..., current: ...}"` — common pattern for question items
+- `ng-repeat`, `ng-if`, `ng-show`, `ng-hide`, `ng-class`, `ng-click`,
+  `ng-disabled`, `ng-model`, `ng-bind`
+- `ng-hide` / `sf-hidden` — both used for hiding elements (Angular's
+  `ng-hide` + SingleFile's `sf-hidden`)
+- `ng-class="{correct: …, incorrect: …, current: …}"` — common pattern for
+  question items
 - `starter.*` — controller alias for list-starter pages
 - `self.*` / `game.*` — controller aliases for game pages
 - `model=game.model` — passing game model into child directives
 
 ---
 
-## 2. File 1 — List Starter (Wrong-Answer State)
+## 2. General Layout — AngularJS vs Tailwind/React
 
-**URL:** `/app/French/1373/187197/list-starter`
+The reactivity of `script.js`'s selector lists matters here: when no Angular
+slot is mounted (files 4–6), many of the selectors below will resolve to
+nothing — that's normal, not a bug.
 
-This is the vocabulary list page. It shows the word pairs, lets you select modes,
-and has the "Start" button. The snapshot was taken **while a wrong answer was
-visible on the in-game overlay** (the game portion is embedded in a modal).
+| File | Has `#list-starter`? | Has `#game-page`? | Era |
+|---|---|---|---|
+| 1 (`EP 8_4 3:48:05`) | ✅ (visible) | (modal embedded) | Legacy AngularJS |
+| 2 (`(5) EP 8_4 3:48:24`) | ❌ | ✅ (visible) | Legacy AngularJS |
+| 3 (`(5) EP 8_4 3:53:53`) | ❌ | ❌ | Tailwind/React shell only |
+| 4 (`EP 8_5 8:53:36`) | ❌ | ❌ | Tailwind/React shell only |
+| 5 (`EP 8_5 8:54:05`) | ❌ | ❌ | Tailwind/React shell only |
+| 6 (`EP 8_5 8:54:21`) | ❌ | ❌ | Tailwind/React shell only |
+| 7 (`EP 8_5 8:54:41`) | ✅ (visible) | ❌ | **Hybrid** |
+| 8 (`(5) EP 8_5 8:55:00`) | ❌ | ✅ (visible, pre-answer) | Legacy AngularJS |
 
-### 2.1 Top-level Structure
+> The Hybrid case (file 7) is the most interesting because it shows both
+> styles on the same page. The Tailwind/React shell provides the breadcrumb
+> (`crumb-child`) and global nav, while the Angular slot provides the
+> `#start-button-main` and `#test-mode-options`.
+
+---
+
+## 3. File 1 / Hybrid list-starter — primary DOM reference
+
+**Reference files:** `EP (8_4_2026 3：48：05 PM).html`, `EP (8_5_2026 8：54：41 AM).html`
+
+These show the vocabulary list page (the word pairs, the mode selector, and
+the Start button). File 1 captured it during an embedded wrong-answer modal;
+file 7 shows the modern hybrid layout.
+
+### 3.1 Top-level Structure
 
 ```
 <div id="list-starter" class="ng-scope">          ← Root container
@@ -95,7 +137,7 @@ visible on the in-game overlay** (the game portion is embedded in a modal).
                     └── <button class="edit-button"> / <button class="delete-button">
 ```
 
-### 2.2 Key IDs & Selectors
+### 3.2 Key IDs & Selectors
 
 | Purpose | Selector |
 |---|---|
@@ -108,16 +150,15 @@ visible on the in-game overlay** (the game portion is embedded in a modal).
 | Question count selector | `#number-of-questions-selector` |
 | Word pairs grid | `.preview-grid` |
 | Grid item (correct) | `.stats-item` with `.correct` class |
-| Grid item (incorrect) | `.stats-item` with `.incorrect` class (when `item.started && item.percentage < 50`) |
+| Grid item (incorrect) | `.stats-item` with `.incorrect` class (`item.started && item.percentage < 50`) |
 | Grid item (current) | `.stats-item.current` |
 | Grid item target word | `.targetLanguage.question-label` |
 | Grid item base word | `.baseLanguage.question-label` |
 | Sidebar browse | `#section-browse-dropdown-button` |
-| Full list toggle | `#full-list-switcher` (ID from script.js, may not exist in every version) |
+| Full list toggle | `#full-list-switcher` (referenced by `script.js`'s legacy `fullList()`) |
 | Slim scroll content | `#slim-scroll-content` |
-| Preview grid container | `#preview-grid-container` |
 
-### 2.3 ng-class patterns for list items
+### 3.3 ng-class patterns for list items
 
 ```js
 ng-class="{
@@ -130,15 +171,14 @@ ng-class="{
 
 ---
 
-## 3. File 2 — In-Game Activity (Game Question)
+## 4. File 2 / In-game activity — primary DOM reference
 
-**URL:** `/app/French/1373/187197/game?mode=1`
+**Reference files:** `(5) EP (8_4_2026 3：48：24 PM).html`, `(5) EP (8_5_2026 8：55：00 AM).html`
 
-This is the active game page — where the user answers questions. The snapshot
-was taken during a **pre-task / start screen** (the game has loaded but the
-question hasn't been answered yet). Contains the full game shell.
+These are the active game page. File 2 captured it during a pre-task / start
+screen; file 8 captured an empty-question state.
 
-### 3.1 Top-level Structure
+### 4.1 Top-level Structure
 
 ```
 <div id="game-page-container" class="v-group game-page notranslate ng-scope">
@@ -159,7 +199,7 @@ question hasn't been answered yet). Contains the full game shell.
   │     │           │                 ng-click="self.onRefreshClick()">
   │     │           │                 "bonjour" ← The question word
   │     │           └── <div id="answer-block" ng-class="{ show: self.showAnswerForSpeakingMode }">
-  │     │                 └── (answer input area — may be hidden on this screen)
+  │     │                 └── <input id="answer-text" autofocus type=text … >  ← verified in file 8
   │     │
   │     └── <div class="classic-game-panel ng-scope ng-isolate-scope lp-mode">
   │           └── (classic game panel — scoreboard, progress, etc.)
@@ -172,29 +212,36 @@ question hasn't been answered yet). Contains the full game shell.
               ├── <button id="continue-button" class="nice-button ng-binding"
               │     ng-click="self.continueButtonClicked()"
               │     ng-disabled="self.continueButtonDisabled">
-              │     "Continue" / "Next"
+              │     "Continue" / "Next question"   ← Hunter Mode advance target (file 2)
               ├── <button id="feedback-button" class="minimal-button ng-hide"
               │     ng-show="self.isEP && self.model.showFeedbackBar">
               ├── <button id="sound-button" class="minimal-button ignore-click">
               │     (sound toggle)
+              ├── <button id="submit-button" ng-click="self.onSubmitClick($event)"
+              │     ng-disabled="self.model.lpInputDisabled" ng-if="!self.isSpeakingMode">
               └── <div id="exit-button" class="h-group v-align-center h-align-center ng-hide"
                     ng-click="self.onExitClick()">
 ```
 
-### 3.2 Key IDs & Selectors (Game Page)
+### 4.2 Key IDs & Selectors (Game Page)
 
 | Purpose | Selector |
 |---|---|
 | Game page container | `#game-page-container` |
 | Question text | `#question-text` |
 | Question block | `#question-block` |
-| Continue button | `#continue-button` |
+| Answer input | `#answer-text` |
+| Submit button | `#submit-button` |
+| Continue button (Hunter Mode primary target) | `#continue-button` |
 | Correct popup | `#correct-popup` |
 | Game action bar | `.game-action-bar` |
 | Classic action bar content | `.classic-action-bar-content` |
 | Feedback button | `#feedback-button` |
 | Hint button | `#hint-button` |
 | Refresh / replay button | `#refresh-button` |
+| Sound toggle | `#sound-button` |
+| Notifications | `.notifications-button` |
+| Nav-bar exit button | `.nav-bar-exit` |
 | Game question content | `#game-question-content` |
 | Question group | `#question-group` |
 | Answer block | `#answer-block` |
@@ -205,7 +252,7 @@ question hasn't been answered yet). Contains the full game shell.
 | Cheer buttons | `.cheer-button` |
 | Cheer result labels | `.cheer-result-label` |
 
-### 3.3 Verdict Detection Signals
+### 4.3 Verdict Detection Signals (Hunter Mode v1)
 
 **Correct answer, visible:**
 - `#correct-popup` — visible (not `ng-hide`/`sf-hidden`)
@@ -216,13 +263,14 @@ question hasn't been answered yet). Contains the full game shell.
 **Wrong answer, visible:**
 - `.history-item.incorrect` — history bar shows a red dot
 - `.action-bar-button.try-again` — try-again button appears in action bar
-- Try-again button with class `.action-bar-button.try-again` + `button:not([disabled])`
+- `tr.incorrect` inside `.modeless-answer-dialog` — wrong-answer modal
 
 **Question finished / verdict available:**
 - `.next-question-button:not([disabled])` — if EP shows a "next" button
 - `#question-text` text content changes or disappears
+- `.information-controls button:not([disabled])` — info "i" button acts as continue
 
-### 3.4 Action Bar Button Types (from CSS)
+### 4.4 Action Bar Button Types (from CSS)
 
 The CSS reveals these button types in the action bar:
 - `.action-bar-button` — generic button wrapper
@@ -230,7 +278,7 @@ The CSS reveals these button types in the action bar:
 - `.action-bar-button.try-again` — the try-again button (wrong answer)
 - `.action-bar-button.try-again.arrow` — try-again with arrow
 
-### 3.5 history-item ng-class
+### 4.5 history-item ng-class
 
 ```js
 ng-class="{
@@ -240,53 +288,64 @@ ng-class="{
 }"
 ```
 
+### 4.6 modeless-answer-dialog (correct/wrong overlay)
+
+When a question is graded, the modeless-answer-dialog modal opens with:
+
+| Element | Selector | Purpose |
+|---|---|---|
+| Question | `#question-field` | The word being asked |
+| Correct answer | `#correct-answer-field` | EP reveals the right answer here |
+| Your (wrong) answer | `#users-answer-field` | What the user typed |
+| Continue button | `#continue-button` | Same button as on the game page |
+
+This is what future "Learn from Error" policy (Hunter Mode v2) will read
+from.
+
 ---
 
-## 4. File 3 — Course Browser (List View)
+## 5. Tailwind/React shell (Files 3, 5–7)
 
-**URL:** `/app/French/1373/187197/browse` (or similar)
+Files 3–6 share the same Tailwind/React `mfeLearnerExperience` shell. They
+differ only in which Angular slot, if any, is mounted.
 
-This is the newer **Tailwind-styled** course browser. It shows the breadcrumb
-navigation and the grid of lessons/tasks. This page uses the newer React-based
-micro-frontend rather than the AngularJS ones.
-
-### 4.1 Top-level Structure
+### 5.1 Top-level Structure
 
 ```
 <div class="mfeLearnerExperience ...">
-  └── (layout with Tailwind classes)
+  └── (single-spa app shell)
         ├── ... (global navigation sidebar)
-        │
-        └── <div class="content-browser v-group">
-              └── <div class="browse-container v-group">
-                    ├── <div class="breadcrumbs h-group v-align-center">
-                    │     └── <div class="crumb">
-                    │     │     └── <span class="name"> French </span>
-                    │     └── <div class="crumb">
-                    │     │     └── <span class="name"> Vocabulary </span>
-                    │     └── <div class="crumb is-active">
-                    │           └── <span class="name"> Basic Vocabulary </span>
-                    │
-                    └── <div class="dashboard-page ng-scope scrollable">
-                          └── (task grid with Tailwind cards)
-                                └── <button class="flex gap-2 ...">
-                                      └── (task card with icon, name, progress)
+        ├── <div class="sticky left-0 top-0 z-10 grid …" id="react-aria671737047-:r0:">
+        │     └── <button class="…rounded-sm border…" id="react-aria671737047-:r0:">
+        │           "Skip to content" (accessibility)
+        ├── <div class="fixed bottom-0 left-0 top-0">  ← global left nav
+        │     └── ...
+        ├── <div class="content-browser v-group">
+        │     └── (breadcrumb row)
+        │           └── <div class="crumb is-active">
+        │                 └── <span class="name"> French </span>
+        ├── <div class="dashboard-page ng-scope scrollable">
+        │     └── (task grid with Tailwind cards)
+        └── <div class="mfeAppShell-Alert__container">  ← alert stack
 ```
 
-### 4.2 Key Selectors (Course Browser)
+### 5.2 Key Selectors (Tailwind Era)
 
 | Purpose | Selector |
 |---|---|
 | Content browser | `.content-browser` |
 | Browse container | `.browse-container` |
-| Breadcrumbs | `.breadcrumbs` |
-| Breadcrumb item | `.crumb` |
+| Breadcrumbs (Angular) | `.breadcrumbs` |
+| Breadcrumb item (Angular) | `.crumb` |
 | Active breadcrumb | `.crumb.is-active` |
+| Breadcrumb item (React/Tailwind) | `.crumb-child` |
 | Dashboard page | `.dashboard-page` |
-| Task cards | `.flex.gap-2` buttons (Tailwind) |
-| Class items (sidebar) | `.flex.items-center.justify-start.h-14` (collection of sidebar navigation items) |
+| Subject content page | `.subject-content-page` |
+| Skip-to-content button | `#react-aria…` (id varies per render) |
+| Task cards (Tailwind) | `button.flex.gap-2.…` (use `crumb-child` as fallback) |
+| Sidebar items | `.flex.items-center.justify-start.h-14` |
 
-### 4.3 Tailwind-based Task Cards
+### 5.3 Tailwind-based Task Cards
 
 The task cards use Tailwind utility classes, not the old AngularJS pattern:
 ```html
@@ -299,147 +358,117 @@ The task cards use Tailwind utility classes, not the old AngularJS pattern:
 
 ---
 
-## 5. Key Selectors for Scripting
+## 6. Key Selectors for Scripting (Hunter Mode v1)
 
-### 5.1 Question Detection
+These are the selectors **actually used by `script.js` on `main` right now**.
+Each one was verified against the HTML snapshots above.
 
+### 6.1 Question Detection
 ```js
-// The current question word
-document.getElementById('question-text');
+document.getElementById('question-text');   // verified in files 2, 8
 
-// Junk filters (words that are not real questions)
+// Junk filters
 const JUNK = /^(replay|hint|submit|electronic|voice|translate|from|to|
                french|english|writing|reading|listening|dictation|speaking|
                practise|pronunciation|master|advanced|unit|vocab|list|\d+%?)$/i;
 ```
 
-### 5.2 Answer Input
-
+### 6.2 Answer Input
 ```js
-// The answer text field
-document.querySelector('#answer-text');
-
-// The active editable element (could be input, textarea, or contenteditable)
-document.activeElement;
+document.querySelector('#answer-text');     // verified in file 8
+document.activeElement;                     // contenteditable fallback
 ```
 
-### 5.3 Vocabulary Pairs
-
+### 6.3 Vocabulary Pairs
 ```js
-// Target language words (e.g. French)
-document.querySelectorAll('.targetLanguage.question-label');
-
-// Base language words (e.g. English)
-document.querySelectorAll('.baseLanguage.question-label');
+document.querySelectorAll('.targetLanguage.question-label');   // files 1, 7
+document.querySelectorAll('.baseLanguage.question-label');     // files 1, 7
 ```
 
-### 5.4 Start / Continue Buttons
-
+### 6.4 Start Buttons
 ```js
-// List-starter main start button
-document.getElementById('start-button-main');
-
-// Activity-starter start button  
-document.getElementById('start-button-school');
-
-// Preview header start button (alternative)
-document.getElementById('preview-header-start-button');
-
-// In-game continue button
-document.getElementById('continue-button');
+document.getElementById('start-button-main');                   // files 1, 7
+document.getElementById('start-button-school');                 // activity-starter only
+document.getElementById('start-button-main-label');             // same, targets label
+document.getElementById('preview-header-start-button');         // files 1, 7 (alt)
 ```
 
-### 5.5 Navigation / Advance
-
+### 6.5 Advance (Hunter Mode — primary target)
 ```js
-// Next question button (EP paper-mode)
+document.querySelector('#continue-button:not([disabled])');    // verified in file 2
+document.querySelector('.modeless-answer-dialog #continue-button:not([disabled])');
 document.querySelector('.next-question-button:not([disabled])');
-
-// Generic next question
-document.querySelector('#next-question:not([disabled])');
-
-// SA navigation controls (game bar)
-document.querySelector('#sa-navigation-controls');
-document.querySelector('.sa-navigation-controls');
-
-// Information controls (the "i" button that acts as continue)
-document.querySelector('.information-controls');
+document.querySelector('#correct-button:not([disabled]), .correct-button:not([disabled])');
+document.querySelector('.information-controls button:not([disabled])');
+document.querySelector('#sa-navigation-controls button:not([disabled])');
+document.querySelector('.sa-navigation-controls button:not([disabled])');
+document.querySelector('.nav-bar-exit:not([disabled])');
+document.querySelector('.game-action-bar button:not([disabled])');
+document.querySelector('.cheer-button:not(.ng-hide):not(.sf-hidden)');
+// Last-resort text match
+// /^(next|continue|next question|ok|got it|done)$/i
 ```
 
-### 5.6 Wrong-Answer Dismissal
-
+### 6.6 Wrong-Answer Dismissal (Hunter Mode — Policy A)
 ```js
-// Try-again button (classic action bar)
+document.querySelector('#continue-button:not([disabled])');              // primary
+document.querySelector('.modeless-answer-dialog #continue-button:not([disabled])');
 document.querySelector('.action-bar-button.try-again button:not([disabled])');
-
-// Game action bar try-again
+document.querySelector('.action-bar-button.try-again:not(.ng-hide):not(.sf-hidden) button');
 document.querySelector('.game-action-bar .action-bar-button.try-again button:not([disabled])');
-
-// Any feedback button
 document.querySelector('.feedback-button:not([disabled])');
+document.querySelector('#sa-navigation-controls button:not([disabled])');
+document.querySelector('.game-action-bar .action-bar-button button:not([disabled])');
+// Last-resort text match
+// /^(try again|continue|next|next question|ok|got it|retry|try it again)$/i
 ```
 
-### 5.7 Correct-Answer Detection
-
+### 6.7 Correct-Answer Detection
 ```js
-// Correct popup (shows "Correct!" + score)
-document.querySelector('#correct-popup');
-document.querySelector('.correct-popup');
-
-// Correct button
+document.querySelector('#correct-popup, .correct-popup');
 document.querySelector('#correct-button, .correct-button');
-
-// Cheer button (post-correct animation)
 document.querySelector('.cheer-button:not(.ng-hide):not(.sf-hidden)');
 ```
 
-### 5.8 History Bar (Verdict Signals)
-
+### 6.8 History Bar (Verdict Signals)
 ```js
-// Incorrect history item
-document.querySelector('.history-item.incorrect');
-
-// Correct history item
-document.querySelector('.history-item.correct');
-
-// Current history item
+document.querySelector('.history-item.incorrect');   // wrong answer
+document.querySelector('.history-item.correct');     // right answer
 document.querySelector('.history-item.current');
 ```
 
-### 5.9 List / Task Navigation
-
+### 6.9 List / Task Navigation
 ```js
-// Task items in the list-starter sidebar
+// Angular list-starter sidebar (file 1, 7)
 document.querySelectorAll('#left-controls-panel .grouped-options > li.item');
 
-// Full list switcher
+// Modern hybrid list-starter (file 7 — same selector usually, but if missing
+// the Tailwind breadcrumbs take over)
+document.querySelectorAll('.crumb-child');    // alternative back-link
+
+// Fallbacks (script.js's skipToNextTask covers both)
+document.querySelector('.breadcrumbs .crumb, .crumb-child');
+document.querySelector('#sa-navigation-controls .back-button, .back-button, [data-action="back"]');
+document.querySelector('a[href*="list-starter"], [ng-click*="list-starter"]');
+
+// Full-list switcher (old UI)
 document.getElementById('full-list-switcher');
-
-// Preview grid scroll area
 document.querySelector('#slim-scroll-content .preview-grid');
-
-// Breadcrumb navigation (course browser)
-document.querySelector('.breadcrumbs .crumb');
 ```
 
-### 5.10 Game Action Bar
-
+### 6.10 Game Action Bar (Hunter Mode — last resort)
 ```js
-// The action bar container
 document.querySelector('.game-action-bar');
-
-// The action bar when it has the 'information' class (question answered)
 document.querySelector('.game-action-bar.sa-action-bar');
-
-// Try-again specific action bar
-document.querySelector('.action-bar-button.try-arrow');
+document.querySelector('.game-action-bar.sa-action-bar.information');  // post-answer
+document.querySelector('.information-controls button:not([disabled])');  // i-button
 ```
 
 ---
 
-## 6. AngularJS Scopes & Controllers
+## 7. AngularJS Scopes & Controllers
 
-### 6.1 List-Starter Controller
+### 7.1 List-Starter Controller
 
 The `#list-starter` div is an AngularJS scope with controller alias `starter`:
 
@@ -447,7 +476,7 @@ The `#list-starter` div is an AngularJS scope with controller alias `starter`:
 |---|---|---|
 | `starter.questions` | Array | The list of word pairs |
 | `starter.selectedQuestion` | Object | Currently selected question |
-| `starter.availableModes` | Array | Available learning modes (Learn, Spell, Test, etc.) |
+| `starter.availableModes` | Array | Available learning modes (Learn, Spell, Test, …) |
 | `starter.numberQuestionOptions` | Array | Options for number of questions |
 | `starter.numberQuestions` | Number | Selected number of questions |
 | `starter.INFINITY` | Constant | Represents "unlimited" mode |
@@ -463,18 +492,19 @@ The `#list-starter` div is an AngularJS scope with controller alias `starter`:
 | `starter.listLimit` | Number | Limit for displayed questions |
 | `starter.increaseLimit()` | Function | Load more questions (infinite scroll) |
 
-### 6.2 Game Page Controller
+### 7.2 Game Page Controller
 
 The game page uses controller alias `self` or `game`:
 
 | Scope property | Type | Description |
 |---|---|---|
 | `self.model` | Object | Game model |
-| `self.model.gameMode` | Number | 1 = classic, 2 = ... |
+| `self.model.gameMode` | Number | 1 = classic, 2 = … |
 | `self.model.minimalUI` | Boolean | Minimal UI mode |
 | `self.model.hideActionUI` | Boolean | Hide action UI |
 | `self.model.sketchPadShown` | Boolean | Sketch pad state |
 | `self.model.lpAnswerEntered` | Boolean | Answer entered |
+| `self.model.lpInputDisabled` | Boolean | Input disabled (e.g. submitted) |
 | `self.isEP` | Boolean | Is EP mode |
 | `self.isSpeakingMode` | Boolean | Speaking mode |
 | `self.isSmartLesson` | Boolean | Smart lesson mode |
@@ -486,7 +516,7 @@ The game page uses controller alias `self` or `game`:
 | `self.showReplayButton` | Boolean | Show replay button |
 | `self.showHintButton` | Boolean | Show hint button |
 | `self.showFeedbackBar` | Boolean | Show feedback bar |
-| `self.continueButtonDisabled` | Boolean | Continue button disabled state |
+| `self.continueButtonDisabled` | Boolean | Continue button disabled |
 | `self.continueButtonClicked()` | Function | Continue button handler |
 | `self.onRefreshClick()` | Function | Refresh/replay handler |
 | `self.onHintClick()` | Function | Hint handler |
@@ -497,102 +527,105 @@ The game page uses controller alias `self` or `game`:
 | `self.cheersEnabled` | Boolean | Cheers enabled |
 | `self.displayBar` | Boolean | Display action bar |
 | `self.enabled` | Boolean | Action bar enabled |
-| `self.arrowController` | Object | Arrow/number mode controller |
-| `self.displayedAnswers` | Array | Currently displayed answers |
 | `self.selectedClassicTestMode` | Number | Selected test mode |
 
 ---
 
-## 7. Navigation Flow
+## 8. Navigation Flow
 
-### 7.1 Typical User Flow
+### 8.1 Typical User Flow
 
 ```
 1. User lands on course browser (file 3)
    └── URL: /app/French/1373/187197/browse
    └── Clicks a lesson → navigates to list-starter
 
-2. List-starter page (file 1)
+2. List-starter page (files 1, 7)
    └── URL: /app/French/1373/187197/list-starter
    └── Shows word pairs in preview grid
    └── User selects mode + number of questions
    └── Clicks "Start" → navigates to game
 
-3. Game page (file 2)
+3. Game page (files 2, 8)
    └── URL: /app/French/1373/187197/game?mode=1
    └── Shows question, answer input, action bar
    └── After answering: correct-popup or try-again
    └── Clicks Continue/Next → next question or back to list-starter
 
 4. After list completes
-   └── Returns to list-starter (file 1)
+   └── Returns to list-starter
    └── Shows updated stats in preview grid
    └── User can start a different mode or go to course browser
 ```
 
-### 7.2 Route Detection for Scripting
+### 8.2 Route Detection for Scripting
 
 ```js
 const url = window.location.href.toLowerCase();
 
-const isListStarter = url.includes('list-starter');
+const isListStarter     = url.includes('list-starter');
 const isActivityStarter = url.includes('activity-starter');
-const isGame = url.includes('game');
-const isBrowse = url.includes('browse');
+const isGame            = url.includes('game');
+const isBrowse          = url.includes('browse');
 
-// Combined checks
 const isTaskPage = isListStarter || isActivityStarter || isGame;
 const isVocabPage = isListStarter;  // vocab loading only on list-starter
 ```
 
 ---
 
-## 8. Appendix: Full Class & ID Reference
+## 9. Appendix: Full Class & ID Reference
 
-### 8.1 All Unique IDs Across All Three Files
+### 9.1 All Unique IDs Across All Eight Files
 
-| ID | File | Element |
+| ID | File(s) | Element |
 |---|---|---|
-| `list-starter` | 1, 3 | Root list-starter div |
-| `left-controls-panel` | 1, 3 | Left panel with mode selector + start button |
-| `right-list-preview-panel` | 1, 3 | Right panel with word grid |
-| `stats-parent` | 1, 3 | Flex container for both panels |
-| `start-container` | 1, 3 | Start button wrapper |
-| `start-button-main` | 1, 3 | Primary start button |
-| `start-button-main-content` | 1, 3 | Start button inner content |
-| `start-button-main-icon` | 1, 3 | Start button icon |
-| `start-button-main-label` | 1, 3 | Start button label text |
-| `preview-header-start-button` | 1, 3 | Alternative start button in preview header |
-| `preview-grid-container` | 1, 3 | Word grid scroll container |
-| `preview-grid-header` | 1, 3 | Grid header with labels |
-| `preview-footer` | 1, 3 | Grid footer with edit/delete |
-| `list-preview-panel-header` | 1, 3 | Preview panel header |
-| `list-progress-group` | 1, 3 | Progress bar group |
-| `section-controls-group` | 1, 3 | Section browse controls |
-| `section-browse-dropdown-button` | 1, 3 | Browse dropdown |
-| `test-mode-options` | 1, 3 | Mode options list |
-| `number-of-questions-selector` | 1, 3 | Question count selector |
-| `slim-scroll-content` | 1, 3 | Scrollable content area |
-| `game-page-container` | 2 | Game page root |
-| `game-page-main` | 2 | Main game content area |
-| `game-question-content` | 2 | Question content area |
-| `question-group` | 2 | Question wrapper |
-| `question-action-bar` | 2 | Question action bar (refresh, hint) |
-| `question-block` | 2 | Question text block |
-| `question-text` | 2 | The question word |
-| `answer-block` | 2 | Answer input area |
-| `correct-popup` | 2 | Correct answer popup |
-| `action-bar` | 2 | Game action bar |
-| `continue-button` | 2 | Continue/Next button |
-| `feedback-button` | 2 | Feedback button |
-| `sound-button` | 2 | Sound toggle |
-| `exit-button` | 2 | Exit button |
-| `refresh-button` | 2 | Refresh/replay |
-| `hint-button` | 2 | Hint button |
-| `react-aria-*` | 1, 2, 3 | React Aria internal IDs (dynamic) |
-| `single-spa-application:*` | 1, 2, 3 | Micro-frontend mount points |
+| `list-starter` | 1, 7 | Root list-starter div |
+| `left-controls-panel` | 1, 7 | Left panel with mode selector + start button |
+| `right-list-preview-panel` | 1, 7 | Right panel with word grid |
+| `stats-parent` | 1, 7 | Flex container for both panels |
+| `start-container` | 1, 7 | Start button wrapper |
+| `start-button-main` | 1, 7 | Primary start button |
+| `start-button-main-content` | 1, 7 | Start button inner content |
+| `start-button-main-icon` | 1, 7 | Start button icon |
+| `start-button-main-label` | 1, 7 | Start button label text |
+| `preview-header-start-button` | 1, 7 | Alternative start button in preview header |
+| `preview-grid-container` | 1, 7 | Word grid scroll container |
+| `preview-grid-header` | 1, 7 | Grid header with labels |
+| `preview-footer` | 1, 7 | Grid footer with edit/delete |
+| `list-preview-panel-header` | 1, 7 | Preview panel header |
+| `list-progress-group` | 1, 7 | Progress bar group |
+| `section-controls-group` | 1, 7 | Section browse controls |
+| `section-browse-dropdown-button` | 1, 7 | Browse dropdown |
+| `test-mode-options` | 1, 7 | Mode options list |
+| `number-of-questions-selector` | 1, 7 | Question count selector |
+| `slim-scroll-content` | 1 | Scrollable content area (legacy) |
+| `game-page-container` | 2, 8 | Game page root |
+| `game-page-main` | 2, 8 | Main game content area |
+| `game-question-content` | 2, 8 | Question content area |
+| `question-group` | 2, 8 | Question wrapper |
+| `question-action-bar` | 2, 8 | Question action bar (refresh, hint) |
+| `question-block` | 2, 8 | Question text block |
+| `question-text` | 2, 8 | The question word |
+| `answer-block` | 2, 8 | Answer input area |
+| `answer-text` | 8 | The answer input element |
+| `correct-popup` | 2, 8 | Correct answer popup |
+| `action-bar` | 2, 8 | Game action bar |
+| `continue-button` | 2 | Continue/Next question button (Hunter Mode primary) |
+| `feedback-button` | 2, 8 | Feedback button |
+| `sound-button` | 2, 8 | Sound toggle |
+| `exit-button` | 2, 8 | Exit button |
+| `refresh-button` | 2, 8 | Refresh/replay |
+| `hint-button` | 2, 8 | Hint button |
+| `submit-button` | 8 | Submit answer button |
+| `modeless-answer-dialog` (overlay) | (rendered at answer time) | Wrong/correct answer modal |
+| `correct-answer-field` | (in modal) | EP reveals correct answer here (Learning-from-Error hook) |
+| `users-answer-field` | (in modal) | User's typed (wrong) answer |
+| `question-field` | (in modal) | Question word in modal |
+| `react-aria-*` | 1, 2, 3, 4–8 | React Aria internal IDs (dynamic) |
+| `single-spa-application:*` | 1–8 | Micro-frontend mount points |
 
-### 8.2 Key CSS Classes (AngularJS Era)
+### 9.2 Key CSS Classes (AngularJS Era)
 
 | Class | Purpose |
 |---|---|
@@ -612,13 +645,13 @@ const isVocabPage = isListStarter;  // vocab loading only on list-starter
 | `.stats-item` | Individual word pair in grid |
 | `.targetLanguage.question-label` | Target language word |
 | `.baseLanguage.question-label` | Base language word |
+| `.game-page` | Game page container |
 | `.game-action-bar` | Bottom action bar in game |
 | `.classic-action-bar` | Classic mode action bar |
 | `.classic-action-bar-content` | Inner content of classic action bar |
 | `.action-bar-button` | Button inside action bar |
 | `.action-bar-button.try-again` | Try-again button (wrong answer) |
 | `.action-bar-button.arrow` | Arrow-styled button |
-| `.game-page` | Game page container |
 | `.ep-animate` | Animation-enabled element |
 | `.native-font` | Uses native font |
 | `.nice-button` | Styled button |
@@ -641,47 +674,48 @@ const isVocabPage = isListStarter;  // vocab loading only on list-starter
 | `.lp` | LanguagePerfect (LP) mode |
 | `.lp-mode` | LP mode active |
 | `.lp-question-content` | LP question content |
+| `.modeless-answer-dialog` | Correct/wrong answer modal |
+| `.notifications-button` | Notifications bell |
 
-### 8.3 Key CSS Classes (Tailwind Era — File 3)
+### 9.3 Key CSS Classes (Tailwind/React Era — Files 3–7)
 
 | Class | Purpose |
 |---|---|
 | `.content-browser` | Course/content browser |
 | `.browse-container` | Browse layout container |
-| `.breadcrumbs` | Breadcrumb navigation |
-| `.crumb` | Individual breadcrumb |
-| `.crumb.is-active` | Active breadcrumb |
+| `.breadcrumbs` | Breadcrumb navigation (Angular) |
+| `.crumb` | Individual breadcrumb (Angular) |
+| `.crumb.is-active` | Active breadcrumb (Angular) |
+| `.crumb-child` | Tailwind breadcrumb chip |
 | `.dashboard-page` | Dashboard/task grid |
+| `.subject-content-page` | Subject content page |
+| `.view-segment-dashboard` | Dashboard view segment |
+| `.main-view-segment` | Main view segment |
+| `.main-content` | Main content area |
 | `.flex` | Display flex |
 | `.flex-col` | Flex column |
 | `.items-center` | Align items center |
 | `.justify-center` | Justify content center |
 | `.justify-start` | Justify content start |
-| `.gap-2` | Gap 8px |
-| `.gap-4` | Gap 16px |
-| `.focusable` | Focusable element with outline |
-| `.bg-neutral-*` | Neutral background shades |
-| `.border-neutral-*` | Neutral border shades |
-| `.text-neutral-*` | Neutral text shades |
-| `.font-medium` | Font weight 500 |
-| `.font-semibold` | Font weight 600 |
-| `.font-bold` | Font weight 700 |
-| `.rounded` | Border radius |
-| `.rounded-sm` | Small border radius |
-| `.transition` | Transition effects |
-| `.ease-in-out` | Easing function |
-| `.w-full` | Width 100% |
-| `.h-full` | Height 100% |
+| `.gap-2` / `.gap-4` | Gap (8px / 16px) |
+| `.focusable` | Focusable element (custom outline) |
+| `.bg-neutral-*` / `.border-neutral-*` / `.text-neutral-*` | Neutral color shades |
+| `.bg-primary` / `.bg-theme-*` | Theme / primary backgrounds |
+| `.font-medium` / `.font-semibold` / `.font-bold` | Font weights |
+| `.rounded` / `.rounded-sm` | Border radii |
+| `.transition` / `.ease-in-out` | Transitions |
+| `.w-full` / `.h-full` / `.h-9` | Width/height |
 | `.aspect-square` | Aspect ratio 1:1 |
 | `.cursor-pointer` | Pointer cursor |
-| `.[disabled]` | Disabled state |
-| `.hover:bg-*` | Hover state background |
-| `.active:bg-*` | Active/pressed state background |
+| `.hover:bg-*` / `.active:bg-*` | Hover / active states |
 | `.mfeLearnerExperience` | Root micro-frontend |
 | `.mfeGlobalNavigation` | Global navigation (sidebar) |
 | `.mfeAppShell-*` | App shell layout |
+| `.mfeAppShell-Scaffold__item` | App shell scaffold item |
 
 ---
 
-> **Last updated:** August 4, 2026
-> **Source files:** `Implement/EP (8_4_2026 3：48：05 PM).html`, `Implement/(5) EP (8_4_2026 3：48：24 PM).html`, `Implement/(5) EP (8_4_2026 3：53：53 PM).html`
+> **Last updated:** August 5, 2026 (after the morning snapshots arrived)
+> **Source files:** all 8 `Implement/*.html` snapshots
+> **Companion docs:** `Implement/HUNTER_MODE_ROADMAP.md` — current status,
+> implementation order, error policies, configuration.

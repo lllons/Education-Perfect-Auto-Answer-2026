@@ -7,6 +7,29 @@
 
 ---
 
+## Current Shipped State (as of `script.js` on `main`)
+
+**Only the v1 slice of this roadmap is currently landed.** Earlier exploratory
+spikes (v2: Learn policy / end-of-list autopilot / progress badge; v3: human-
+presence detector, confidence scoring, telemetry Export, adaptive threshold,
+adaptive typing speed, self-healing alternates) were prototyped and rolled
+back — the script currently contains **only the three pillars below**:
+
+1. **Auto-advance** — when the current question is graded correct or wrong,
+   click `#continue-button` (the EP "Next question" button) and move to the
+   next question without user input.
+2. **Dismiss & Continue** (`errorPolicy: 'dismiss'`) — when a wrong-answer
+   overlay appears, click the dismiss / try-again / continue button on it. The
+   script is never stuck.
+3. **Skip list** — a new "Skip list" button on `#ep-panel` jumps straight to the
+   next task in the sidebar of the list-starter page.
+
+Everything from §6.2 (Learn from Error), §7 (autonomous-thinking ideas), and
+most of §5.4 (end-of-list auto-continue) is **planned but not yet shipped**.
+Update the §10 status table when a new feature lands.
+
+---
+
 ## 1. Why "Hunter Mode"?
 
 Today the script is **reactive**: a `MutationObserver` + interval poll detect the
@@ -33,17 +56,18 @@ the current one is dead.
 1. **Zero-click completion of a loaded list** — once `Load` is pressed, the
    script finishes the list on its own.
 2. **Automatic list hopping** — when a list finishes, open the next list in the
-   same session (configurable).
+   same session (configurable). *(planned, not shipped)*
 3. **Survive wrong answers** — either dismiss the error and continue, *or*
    learn the correct answer from the feedback the moment EP reveals it.
+   *(dismiss shipped; learn planned)*
 4. **Stay out of the user's way** — if a human starts typing, hand control back
-   instantly.
+   instantly. *(planned)*
 5. **Be safe to leave running** — bounded iterators, kill-switches, and visible
    state at all times.
 
 ---
 
-## 3. Non-Goals (out of scope for v1)
+## 3. Non-Goals (out of scope)
 
 * Bypassing EP's network/API — Hunter Mode is purely a DOM driver, same as the
   rest of the script.
@@ -71,66 +95,75 @@ Vocabulary Loader ─► Answer Map Builder ─► Question Detector ─► Fuzz
                                                            • #start-button-school /
                                                              #start-button-main-label
                                                              start helpers
-```
 
-Hunter Mode sits **on top** of this pipeline as a small controller that
-manages *question lifecycle* rather than answer typing.
+Hunter Mode (v1) sits ON TOP of this pipeline as a small state machine that
+manages *question lifecycle* rather than answer typing:
+
+               ┌─── start-button-main click (idle on list-starter)
+Hunter.tick ───┤
+  (500 ms)     └─── start-button-school click (idle on activity-starter)
+                  │
+                  ▼
+        IDLE → DETECTED → AWAIT_VERDICT → ADVANCE → IDLE
+                                  │
+                  ┌─── dismissWrongAnswer()  (errorPolicy = 'dismiss')
+                  └─── clickAdvanceButton()   (#continue-button)
+```
 
 ---
 
-## 5. Hunter Mode — Core Design
+## 5. Hunter Mode — Core Design (v1 shipped)
 
-### 5.1 Question state machine
+### 5.1 Question state machine (v1)
 
-Introduce a single finite-state object per question to replace the loose flags
-(`filling`, `lastFilled`, `cooldownUntil`, `pageChanging`):
+A single finite-state object per question replaces the loose flags (`filling`,
+`lastFilled`, `cooldownUntil`, `pageChanging`):
 
 ```
-IDLE  ─► DETECTED (question-word seen)
+IDLE  ─► DETECTED (question-word seen via #question-text)
         │
         ▼
-   TYPING (typeAtCursor running)
-        │
-        ▼
-  AWAIT_VERDICT (waiting for EP to mark right/wrong)
+   AWAIT_VERDICT (waiting for EP to mark right/wrong)
         │      ▲
-   "next" click│      │ wrong-answer overlay handled by ErrorPassPolicy
+   advance click│      │ wrong-answer overlay handled by Policy A
         ▼      │
      ADVANCE  ─┘
         │
-   LIST_DONE ─► NEXT_LIST (if configured) or STOP
+   back to IDLE
 ```
 
-This replaces ad-hoc cooldowns with explicit transitions, which makes "what
-happens after a wrong answer" a discrete hook instead of a heuristic.
+The full pipeline (TYPING) stays inside the existing `tryFill()` —
+Hunter just waits for `filling = false` before polling for a verdict.
 
-### 5.2 "Question finished" detection
+### 5.2 "Question finished" detection (v1)
 
 Hunter Mode needs to know **the moment a question is over**. Any of the below
 counts as a verdict signal (highest priority first):
 
-| Signal | DOM hint |
-|---|---|
-| Result overlay appears | `#incorrect-feedback`, `.feedback.incorrect`, `[data-result="wrong"]`, etc. |
-| Correct toast / animation | `#correct-feedback`, `.feedback.correct`, green flash on the word |
-| "Next" button becomes enabled | `#next-question`, `.sa-navigation-controls button`, `[data-action="next"]` |
-| Question text disappears | `#question-text` removed or replaced |
-| Score / progress increments | progress bar selector TBD |
+| Signal | DOM selector (verified in `Implement/*.html`) | Verdict |
+|---|---|---|
+| Result overlay — incorrect row | `.modeless-answer-dialog tr.incorrect` | `incorrect` |
+| Result overlay — correct row | `.modeless-answer-dialog tr.correct` | `correct` |
+| Try-again button visible | `.action-bar-button.try-again` (with `button:not([disabled])`) | `incorrect` |
+| Cheer-button visible | `.cheer-button:not(.ng-hide):not(.sf-hidden)` | `correct` |
+| Paper-mode next button | `.next-question-button:not([disabled])` | `correct` |
+| SA navigation / info button | `#sa-navigation-controls button`, `.information-controls button` | `correct` |
 
 The first one wins. Each signal fires the **Advance** transition.
 
-### 5.3 Advance transition
+### 5.3 Advance transition (v1)
 
-* Wait **CFG.advanceDelay** ms (default ~600 ms) so EP animations settle.
-* If there is an enabled **Next** button, click it.
-* Otherwise click the **Continue** / **OK** button on whatever overlay exists.
-* If neither exists but the question text changed, treat the new text as the
-  next question immediately.
-* Reset `lastFilled`, `cooldownUntil`, `filling = false`.
+`clickAdvanceButton()` tries a priority list of selectors, starting with
+`#continue-button:not([disabled])` — the canonical "Next question" button
+in the EP game-page DOM (`<button class="nice-button ng-binding"
+id="continue-button … > Next question </button>`, verified in
+`(5) EP (8_4_2026 3：48：24 PM).html`). After clicking, Hunter waits
+`CFG.hunter.advanceDelay` ms (default `600`) before resetting
+`lastFilled`, `cooldownUntil`, `filling = false` and returning to `IDLE`.
 
-### 5.4 End-of-list handling
+### 5.4 End-of-list handling (planned)
 
-When the last question of a list finishes:
+*(Not in v1.)* When the last question of a list finishes:
 
 1. Detect list-done UI (e.g. EP's "List complete — score: X%" screen).
 2. If `hunter.autoContinueLists` is on, click the **Next list / Start next**
@@ -139,58 +172,49 @@ When the last question of a list finishes:
 4. Persist progress to `localStorage.ep.progress[listId]` so a refresh can
    resume or skip already-completed lists.
 
-### 5.5 Configuration additions
-
-Insert into the existing `CFG` block:
+### 5.5 Configuration (v1 — actual values in `script.js`)
 
 ```js
 hunter: {
-  enabled              : false,   // master toggle
-  advanceDelay         : 600,     // ms after verdict before clicking Next
-  maxQuestionsPerRun   : 0,       // 0 = unlimited
-  autoContinueLists    : false,   // walk straight into the next list
-  betweenListDelay     : 1500,    // ms pause between lists
-  errorPolicy          : 'dismiss', // 'dismiss' | 'learn' | 'hybrid'
-  humanPresenceWindow  : 1500,    // ms of user typing that suspends Hunter
-  killOnUrlChange      : true,    // stop Hunter if user navigates manually
+  enabled      : false,        // master toggle (state at install)
+  advanceDelay : 600,          // ms after verdict before clicking Next
+  errorPolicy  : 'dismiss',    // v1: dismiss-only. Learn / hybrid are planned.
+  autoStart    : true,         // tick.idle clicks #start-button-main / #start-button-school
 }
 ```
 
-A new `Hunter` button is added next to `Pause` in `#ep-panel`. It lights up
-green when on, red when paused.
+A new **Hunter** button (`#ep-hunter`) is added below the existing row in
+`#ep-panel`. It lights up green (`#1b6d2a`) when on. A new **Skip list**
+button (`#ep-skip`, amber `#6d3f1b`) sits next to it.
 
 ---
 
-## 6. Error Handling — Two Policies
+## 6. Error Handling
 
-Error handling is the second pillar of Hunter Mode. A wrong answer is currently
-a hard stop: the script types something, EP grades it wrong, and the user has
-to dismiss the overlay and move on. Hunter Mode formalises what the script
-does *instead*.
-
-### 6.1 Policy A — **Dismiss & Continue** (`errorPolicy: 'dismiss'`)
+### 6.1 Policy A — **Dismiss & Continue** (`errorPolicy: 'dismiss'`) — v1 ✅
 
 Goal: never get stuck on a wrong answer.
 
 1. The **AWAIT_VERDICT** state notices a wrong-answer overlay (column 1 of the
-   table above).
-2. Capture the question word that was just answered (for logging).
-3. Wait `errorDismissDelay` ms (default 250 ms) for EP to finish animating.
-4. Locate and click the "Continue" / "Try again" / "Next" button on the overlay.
-   Selector priority:
-   * `[data-action="continue"]`
-   * `button.continue, button.try-again, button.next`
-   * Generic: any visible button whose text matches
-     `/continue|try again|next|got it|ok/i`.
-5. If multiple candidates exist, prefer the one closest to the overlay's root
-   element.
-6. If no overlay exists, do nothing — the Question Detector will simply not
+   table in §5.2).
+2. Capture the question word that was just answered (for scoring).
+3. Wait `CFG.hunter.advanceDelay` ms for EP to finish animating.
+4. Locate and click the dismiss button. Selector priority (from the real EP
+   DOM in `Implement/*.html`):
+   * `#continue-button:not([disabled])`
+   * `.modeless-answer-dialog #continue-button:not([disabled])`
+   * `.action-bar-button.try-again button:not([disabled])`
+   * `.feedback-button:not([disabled])`
+   * `#sa-navigation-controls button:not([disabled])`
+   * generic `.game-action-bar .action-bar-button button:not([disabled])`
+   * text fallback: `/try again|continue|next|next question|ok|got it|retry/i`
+5. If no overlay exists, do nothing — the Question Detector will simply not
    find the old word anymore and the Advance transition handles it.
 
 This is the safe default: nothing is learned, nothing is overwritten, Hunter
 just keeps moving.
 
-### 6.2 Policy B — **Learn from Error** (`errorPolicy: 'learn'`) 🌟 preferred
+### 6.2 Policy B — **Learn from Error** (`errorPolicy: 'learn'`) — planned 🌟
 
 Goal: every wrong answer makes the script permanently smarter.
 
@@ -198,6 +222,7 @@ Goal: every wrong answer makes the script permanently smarter.
 2. **Read the correct answer out of the overlay.** EP usually reveals it on a
    wrong-answer screen (e.g. *"Correct answer: hola"*). Match by:
    * `[data-correct-answer]` attribute, when present.
+   * `#correct-answer-field` (verified in `(5) EP (8_4_2026 3：48：24 PM).html`).
    * Text inside `.correct-answer`, `.answer-reveal`, `#solution`,
      `[class*="solution"]`.
    * Fallback: any element inside the overlay whose label says
@@ -206,125 +231,100 @@ Goal: every wrong answer makes the script permanently smarter.
    ```js
    answerMap[norm(questionWord)] = stripAlts(correctAnswer);
    ```
-   Also add the inverse if the dataset is bidirectional.
-4. **Persist** the new pair to `localStorage.ep.learned` so reloads keep it.
-   Use a small ring buffer (e.g. last 500 pairs) to avoid runaway growth.
+4. **Persist** the new pair to `localStorage.ep.learned` so reloads keep it
+   (ring buffer, last 500 pairs).
 5. Click the **Continue** button (same logic as 6.1 step 4).
-6. Hunter Mode then re-types the *new* answer on the retry question (now that
-   the same word is in `answerMap`) — naturally producing a correct retry.
+6. Hunter Mode then re-types the *new* answer on the retry question.
 
-This is the "even better" option the user asked for: the script improves
-itself in real time.
-
-### 6.3 Hybrid (`errorPolicy: 'hybrid'`)
+### 6.3 Hybrid (`errorPolicy: 'hybrid'`) — planned
 
 If the overlay reveals a parseable correct answer → do **Policy B**. If it
-doesn't (e.g. small free-text input where EP just animates a red flash without
-text), fall back to **Policy A**. Recommended default.
+doesn't (e.g. EP animates a red flash without text), fall back to **Policy A**.
+Recommended once B is implemented.
 
-### 6.4 Conflict prevention
+### 6.4 Conflict prevention (planned for B/C)
 
-Both policies must respect:
-
-* `humanPresenceWindow` — never click through an overlay if a human is typing
-  inside it.
+* `humanPresenceWindow` — never click through an overlay while a human is
+  typing inside it.
 * `filling` flag — never overwrite a half-typed answer.
 * Cooldown — after a wrong answer, lengthen `typeCooldown` for that word by
-  ~250 ms so Hunter doesn't fire twice.
+  ~250 ms.
 
 ---
 
-## 7. Other Autonomous-Thinking Additions
-
-Small features in the same spirit as Hunter Mode, all of which can land
-together:
+## 7. Other Autonomous-Thinking Additions (all planned, none shipped)
 
 ### 7.1 Human-presence detector
-Watch for `keydown`, `click`, `input` events originating from a real user in
-the answer field. When one fires, Hunter Mode drops back to **Monitor Only**:
-it still detects questions and *would* answer, but holds back and surfaces a
-subtle badge: `👤 Human typing — Hunter idle`. Auto-resumes after
+Watch for `keydown`, `click`, `input` events from a real user on the answer
+field. Hunter Mode drops back to **Monitor Only** and surfaces
+`👤 Human typing — Hunter idle`. Auto-resumes after
 `hunter.humanPresenceWindow` ms of silence.
 
 ### 7.2 Smart list navigation
-Reuse the existing `fullList()` flow but in reverse: detect the "List complete"
-screen, then `#slim-scroll-content .preview-grid` and pick the row immediately
-after the one we just finished. Open it, click its start button, repeat.
+Detect the "List complete" screen, then `#slim-scroll-content .preview-grid`
+and pick the row immediately after the one we just finished. Open it, click
+its start button, repeat.
 
 ### 7.3 Adaptive fuzzy threshold
-Track `similarity()` score distribution per session. If many questions are
-landing near the `fuzzyThreshold` boundary, raise the threshold a tick. If
-questions are consistently missing by a hair, lower it. Self-tuning, but
-clamped to a `[0.4, 0.9]` band so it can't drift to nonsense.
+Track `similarity()` score distribution per session. If many questions land
+near `fuzzyThreshold` boundary → raise it. If they consistently miss by a
+hair → lower it. Self-tuning, clamped to `[0.4, 0.9]`.
 
 ### 7.4 Adaptive typing speed
-If EP grades more than ~90 % of the script's answers correct, gradually drop
-`typeDelay` toward 0. If grades start failing, raise it. Keeps the script as
-fast as the current Exercise/teacher allows.
+If EP grades > 90 % correct, gradually drop `typeDelay` toward 0. If grades
+start failing, raise it.
 
 ### 7.5 Progress badge & ETA
-Add a tiny line to the floating panel: `⚡ 37/120 · ~1m 12s left`. Computed
-from a rolling average of time-per-question. Disappears when Hunter is off.
+Tiny line in the floating panel: `⚡ 37/120 · ~1m 12s left`. Currently the
+debug line shows `🕵️ N✓ N✗ · Xm Ys · "word"`.
 
 ### 7.6 Self-healing answers
-The script already runs `stripAlts()` at load and at fill time. Extend this to:
-
-* Detect when an answer key has a `;` separator and split into alternates,
-  storing **all** alternates in `answerMap` keyed off the same question.
-* Strip EP's occasional " (← hint)" / "with accent" trailers when reading the
-  pair grid.
+Extend `stripAlts()` to: detect `;` separators and split into alternates;
+strip EP's occasional " (← hint)" / "with accent" trailers.
 
 ### 7.7 Idle / between-list sleep
-After a list completes, emit a single calming toast `💤 Sleeping 1.5s before
-next list…` so the user understands the pause. Configurable
-`betweenListDelay`.
+After a list completes, emit `💤 Sleeping 1.5s before next list…` so the user
+understands the pause. Configurable `betweenListDelay`.
 
 ### 7.8 Telemetry dump (opt-in)
-When a debug flag `hunter.telemetry` is on, write a daily JSON of:
-
-* questions attempted
-* right / wrong counts per list
-* new pairs learned
-* avg time per question
-
-Stored in `localStorage.ep.telemetry` and downloadable via a new tiny
-`Export` button. Zero external network used.
+Daily JSON of right / wrong counts, learned pairs, avg time per question.
+Stored in `localStorage.ep.telemetry`. New tiny `Export` button to download.
 
 ### 7.9 Per-word confidence
-Tag each entry in `answerMap` with a confidence score:
-
-* `1.0` from official pair grid at load.
-* `+1` every time the script gets it right.
-* `0.5` from `learn` policy (uncertain until verified).
-* Decay slowly over time so stale "learned" pairs can be re-verified.
-
-When matching, prefer high-confidence keys over fuzzy lookups.
+Tag each `answerMap` entry with `1.0` (grid) / `0.5` (learned) / `+0.2` per
+verified correct / decay over time. Prefer high-confidence keys over fuzzy
+lookups.
 
 ### 7.10 Visible kill-switch
 Big red `🛑 STOP` button in the panel that clears `hunter.enabled`, cancels
-all timers, and (importantly) leaves the script in its current mode rather
-than fully tearing down. One click = Hunter off, original assistant still on.
+all timers, and leaves the rest of the script intact.
 
 ---
 
 ## 8. Suggested Implementation Order
 
-1. **Question state machine refactor** (`IDLE → DETECTED → TYPING →
-   AWAIT_VERDICT → ADVANCE`). Non-breaking; everything else still works.
-2. **Verdict detection** (table from §5.2) — purely passive, no clicks.
-3. **Advance transition** — first end-to-end "no user input needed" demo for
-   *one* question.
-4. **Dismiss policy** (Policy A) — minimal risk, shippable.
-5. **Learn policy** (Policy B) — the headline feature.
-6. **End-of-list + auto-continue lists.**
-7. **Human-presence detector + kill-switch.** (Required safety before opening
-   it up to long sessions.)
-8. **Progress badge + adaptive typing speed.**
-9. **Per-word confidence + self-healing alternates.**
-10. **Telemetry opt-in + slow fuzz adaptation.**
+Status legend: ✅ shipped in v1 · 🟡 planned · ❌ deferred / out of scope.
 
-Steps 1–4 land in a single PR on `full` first, then get promoted to `main`
-once they survive a couple of full lists on a real EP account.
+| # | Step | Status |
+|---|---|---|
+| 1 | Question state machine (`IDLE → DETECTED → AWAIT_VERDICT → ADVANCE`) | ✅ v1 |
+| 2 | Verdict detection (table in §5.2) | ✅ v1 |
+| 3 | Advance transition (`#continue-button` + fallbacks) | ✅ v1 |
+| 4 | Dismiss policy (Policy A) | ✅ v1 |
+| 5 | Skip-list button on panel (`#stats-parent .starter-panel .grouped-options > li.item`) | ✅ v1 (+ extras) |
+| 6 | Learn policy (Policy B) — `errorPolicy: 'learn'` | 🟡 |
+| 7 | End-of-list + auto-continue lists | 🟡 |
+| 8 | Human-presence detector + kill-switch | 🟡 |
+| 9 | Progress badge + adaptive typing speed | 🟡 |
+| 10 | Per-word confidence + self-healing alternates | 🟡 |
+| 11 | Telemetry opt-in + slow fuzz adaptation | 🟡 |
+
+Steps 1–5 land as a single working slice ("Hunter Mode v1") on `main`. They
+are safe — Policy A never touches `answerMap`, never persists anything to
+`localStorage`, and the Hunter toggle is opt-in. Steps 6+ should each be
+their own PR with a clear toggle (`CFG.hunter.errorPolicy = 'learn'|'hybrid'|
+'adaptive'|...`) so v1 users can keep `errorPolicy: 'dismiss'` until they're
+ready.
 
 ---
 
@@ -332,38 +332,105 @@ once they survive a couple of full lists on a real EP account.
 
 * **EP DOM churn.** Every selector above is best-effort. Need fallbacks and a
   way for users to file selector reports from a `Report broken selector`
-  button in the panel.
+  button in the panel. The 8 HTML snapshots in `Implement/` (3 from Aug 4,
+  5 from Aug 5) reinforce the selector reference; check there first when
+  investigating a regression.
 * **Page re-renders wiping Hunter state.** Re-attach Hunter from the existing
   `updatePanelVisibility()` interval and not from `init()` only.
-* **Learning wrong answers.** If Policy B misreads the overlay (e.g. tips
-  vs. correct answer), the script will keep filling the wrong word. Need a
-  sanity check: the new answer must also pass `similarity()` against the
-  *next* time the same question appears, and learned entries are dropped
-  after N consecutive regressions.
+* **Learning wrong answers.** *(only relevant if Policy B is enabled.)* If
+  `learnFromError` misreads the overlay (e.g. tips vs. correct answer), the
+  script will keep filling the wrong word. Need a sanity check: the new
+  answer must also pass `similarity()` against the *next* time the same word
+  appears, and learned entries are dropped after N consecutive regressions.
 * **Teacher visibility.** Hunter Mode on a normal school account will trivially
-  produce perfect scores. That's the user's call (existing disclaimer still
-  applies); not a code problem, just worth documenting in the README before
-  public-facing deploy.
+  produce perfect scores. That's the user's call (existing disclaimer in
+  `README.md` still applies).
 
 ---
 
 ## 10. Status
 
-| Item | State |
-|---|---|
-| Question state machine | **Done** (v1) |
-| Verdict detection | **Done** (v1) |
-| Advance transition | **Done** (v1) |
-| Dismiss policy (A) | **Done** (v1) |
-| Learn policy (B) | **Done** (v2) |
-| End-of-list autopilot | **Done** (v2) |
-| Human-presence detector | **Done** (v3) |
-| Progress badge | **Done** (v2 — debug line shows score + timer) |
-| Per-word confidence | **Done** (v3) |
-| Telemetry opt-in | **Done** (v3) |
-| Adaptive fuzzy threshold | **Done** (v3) |
-| Adaptive typing speed | **Done** (v3) |
-| Self-healing answers | **Done** (v3 — semicolon alts, smartStrip) |
+| Item | State | In `script.js`? |
+|---|---|---|
+| Question state machine | **Done** (v1) | ✅ yes |
+| Verdict detection | **Done** (v1) | ✅ yes |
+| Advance transition (`#continue-button` first) | **Done** (v1) | ✅ yes |
+| Dismiss policy (A) | **Done** (v1) | ✅ yes |
+| Skip-list button | **Done** (v1) | ✅ yes |
+| IDLE auto-start on starter screens | **Done** (v1) | ✅ yes |
+| Learn policy (B) | Planned | ❌ not yet |
+| End-of-list autopilot | Planned | ❌ not yet |
+| Human-presence detector | Planned | ❌ not yet |
+| Adaptive fuzzy threshold | Planned | ❌ not yet |
+| Adaptive typing speed | Planned | ❌ not yet |
+| Self-healing alternates / smartStrip | Planned | ❌ not yet |
+| Per-word confidence | Planned | ❌ not yet |
+| Telemetry opt-in + Export button | Planned | ❌ not yet (Export button removed) |
+| Visible kill-switch | Planned | ❌ not yet |
+| Progress badge (debug line only) | Partial — debug shows `🕵️ N✓ N✗ · Xm Ys · "word"`; no ETA yet | ✅ partial |
+| Daily list-id progress persistence | Planned | ❌ not yet |
+
+> Update this table when a new feature lands.
+
+---
+
+## Appendix — Selector Reference (v1 selectors actually used)
+
+All selectors below are derived from EP HTML snapshots in `Implement/`.
+`$(...)` shorthand assumes `document.querySelector(...)`.
+
+### Verdict detection (hunter.js)
+```
+.modeless-answer-dialog tr.incorrect   → 'incorrect'
+.modeless-answer-dialog tr.correct     → 'correct'
+.action-bar-button.try-again button     → 'incorrect'
+.cheer-button:not(.ng-hide):not(.sf-hidden) → 'correct'
+.next-question-button:not([disabled])   → 'correct'
+#sa-navigation-controls button:not([disabled]) / .information-controls button → 'correct'
+```
+
+### Advance click
+```
+$(#continue-button:not([disabled]))     ← primary (verified in game-page HTML)
+$(.next-question-button:not([disabled]))
+$(#correct-button:not([disabled]))
+$(.information-controls button:not([disabled]))
+$(#sa-navigation-controls button:not([disabled]))
+$(.nav-bar-exit:not([disabled]))
+$(.game-action-bar button:not([disabled]))
+$(.cheer-button:not(.ng-hide):not(.sf-hidden))
+```
+
+### Dismiss click
+```
+$(#continue-button:not([disabled]))
+$(.action-bar-button.try-again button:not([disabled]))
+$(.feedback-button:not([disabled]))
+$(#sa-navigation-controls button:not([disabled]))
+$(.game-action-bar .action-bar-button button:not([disabled]))
+```
+
+### Skip list
+On `list-starter`:
+```
+$all(#stats-parent .starter-panel .grouped-options > li.item)
+   .classList.contains('selected') | 'active'   ← current task
+   click the *next* item
+fallback: $('.breadcrumbs .crumb, .crumb-child')
+```
+On `game` or `activity-starter`:
+```
+$('#sa-navigation-controls .back-button, .back-button, [data-action="back"]')
+   OR an `<a href="...list-starter...">` link.
+```
+
+### Idle auto-start
+```
+on list-starter     → $(#start-button-main)
+on activity-starter → $(#start-button-school)
+```
+
+---
 
 This file lives in `Implement/` so it can be referenced from the README without
 polluting the script root. Update status here as PRs land.
