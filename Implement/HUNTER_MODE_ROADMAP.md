@@ -357,10 +357,13 @@ once they survive a couple of full lists on a real EP account.
 | Dismiss policy (A) | **Done** (v1) |
 | Learn policy (B) | **Done** (v2) |
 | End-of-list autopilot | **Done** (v2) |
-| Human-presence detector | Not started |
+| Human-presence detector | **Done** (v3) |
 | Progress badge | **Done** (v2 — debug line shows score + timer) |
-| Per-word confidence | Not started |
-| Telemetry opt-in | Not started |
+| Per-word confidence | **Done** (v3) |
+| Telemetry opt-in | **Done** (v3) |
+| Adaptive fuzzy threshold | **Done** (v3) |
+| Adaptive typing speed | **Done** (v3) |
+| Self-healing answers | **Done** (v3 — semicolon alts, smartStrip) |
 
 This file lives in `Implement/` so it can be referenced from the README without
 polluting the script root. Update status here as PRs land.

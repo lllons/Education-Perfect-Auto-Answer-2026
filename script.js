@@ -29,8 +29,10 @@
     activity: "Auto-selects or type the correct answer using AI.",
   }
  
-  const LEARNED_KEY = 'ep.learned'; // localStorage key for learned pairs
-  const MAX_LEARNED = 500;          // max learned pairs to keep
+  const LEARNED_KEY = 'ep.learned';   // localStorage key for learned pairs
+  const TELEMETRY_KEY = 'ep.telemetry'; // localStorage key for telemetry
+  const CONFIDENCE_KEY = 'ep.confidence'; // localStorage key for confidence scores
+  const MAX_LEARNED = 500;            // max learned pairs to keep
 
   const CFG = {
     fuzzyThreshold : 10,
@@ -47,6 +49,11 @@
       errorPolicy    : 'hybrid',  // 'dismiss' | 'learn' | 'hybrid' (learn+fallback)
       autoContinueLists: false,  // walk straight into the next list
       showProgress   : true,    // show progress badge in panel
+      humanPresenceWindow: 1500,// ms of user typing that suspends Hunter
+      adaptiveThreshold: true,  // self-tune fuzzy threshold
+      adaptiveSpeed: true,      // self-tune typing speed
+      telemetry: false,         // opt-in daily stats
+      trackConfidence: true,    // per-word confidence scores
     },
   };
  
@@ -84,7 +91,68 @@
   let hunterLearned = null;         // {word, answer} from learn policy, or null
   let hunterNoAdvanceCount = 0;     // consecutive ticks with no advance button
   let hunterPreviousErrorPolicy = ''; // saved error policy when switching to hybrid
+
+  // ── Human-presence detector state ──
+  let hunterHumanActive = false;    // true when a human is actively typing
+  let hunterHumanTimer = null;      // timer to resume after silence
+  let hunterHumanSuspended = false; // Hunter was suspended due to human presence
+
+  // ── Adaptive threshold state ──
+  let adaptiveScores = [];          // rolling window of similarity scores
+  const ADAPTIVE_WINDOW = 20;       // number of scores to track
+  let adaptiveMinThreshold = 4;     // min clamp for fuzzy threshold
+  let adaptiveMaxThreshold = 12;    // max clamp
+
+  // ── Confidence tracking ──
+  let confidenceMap = {};           // { normKey: { score: number, source: 'grid'|'learned'|'verified', count: number } }
+
+  // ── Telemetry ──
+  let telemetryData = null;         // loaded on start
  
+  // ── Human-presence detector ──
+  // Watch for real user interaction in the answer field. When detected,
+  // suspend Hunter activity and resume after a silence window.
+  function onHumanInteraction(e) {
+    if (!hunterEnabled) return;
+
+    // Only care about interactions in the answer field
+    const target = e.target;
+    const isAnswerField = target && (
+      target.id === 'answer-text' ||
+      target.closest('#answer-text') ||
+      target.isContentEditable ||
+      target.closest('[contenteditable]') ||
+      target.closest('.lp-question-content') ||
+      target.closest('#answer-block')
+    );
+
+    if (!isAnswerField) return;
+
+    hunterHumanActive = true;
+
+    if (!hunterHumanSuspended && hunterEnabled) {
+      hunterHumanSuspended = true;
+      setDebug('👤 Human typing — Hunter idle');
+      console.log('[Hunter] Human detected — suspending');
+    }
+
+    // Reset the silence timer
+    if (hunterHumanTimer) clearTimeout(hunterHumanTimer);
+    hunterHumanTimer = setTimeout(() => {
+      hunterHumanActive = false;
+      hunterHumanSuspended = false;
+      if (hunterEnabled) {
+        console.log('[Hunter] Human idle — resuming');
+        updateHunterDebug();
+      }
+    }, CFG.hunter.humanPresenceWindow);
+  }
+
+  // Bind human-presence listeners
+  document.addEventListener('keydown', onHumanInteraction, true);
+  document.addEventListener('click', onHumanInteraction, true);
+  document.addEventListener('input', onHumanInteraction, true);
+
   window.addEventListener('beforeunload', () => {
     pageChanging = true;
     if (hunterEnabled) stopHunter();
@@ -132,17 +200,8 @@
   }
  
   function findAnswer(raw) {
-    const q = norm(raw);
-    if (!q) return null;
-    if (answerMap[q]) return answerMap[q];
-    for (const [k, v] of Object.entries(answerMap))
-      if (k.includes(q) || q.includes(k)) return v;
-    let best = 0, bestVal = null;
-    for (const [k, v] of Object.entries(answerMap)) {
-      const sc = similarity(q, k);
-      if (sc > best) { best = sc; bestVal = v; }
-    }
-    return best >= CFG.fuzzyThreshold ? bestVal : null;
+    // Use confidence-aware version
+    return findAnswerWithConfidence(raw);
   }
  
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -168,19 +227,43 @@
     const len = Math.min(targets.length, bases.length);
  
     for (let i = 0; i < len; i++) {
-      // Strip semicolon alts from BOTH sides when building the map
-      const target = stripAlts((targets[i].textContent || '').trim());
-      const base   = stripAlts((bases[i].textContent   || '').trim());
-      if (target && base) {
-        map[norm(target)] = base;
-        map[norm(base)]   = target;
-        count++;
+      const rawTarget = (targets[i].textContent || '').trim();
+      const rawBase   = (bases[i].textContent   || '').trim();
+
+      // Self-healing: parse semicolons into alternates
+      const targetAlts = parseAlts(rawTarget);
+      const baseAlts   = parseAlts(rawBase);
+
+      // Map each alternate to each other
+      for (const t of targetAlts) {
+        for (const b of baseAlts) {
+          const normT = norm(t);
+          const normB = norm(b);
+          if (normT && normB) {
+            if (!map[normT]) {
+              map[normT] = b;
+              count++;
+            }
+            if (!map[normB]) {
+              map[normB] = t;
+              count++;
+            }
+          }
+        }
       }
     }
  
     answerMap = map;
     lastFilled = '';
     cooldownUntil = 0;
+
+    // Tag loaded pairs with grid confidence
+    if (CFG.hunter.trackConfidence) {
+      for (const key of Object.keys(map)) {
+        updateConfidence(key, 'grid');
+      }
+    }
+
     updatePanel(count);
     showToast(count > 0 ? `✅ ${count} pairs loaded` : `⚠️ No vocab found`);
     console.log('[EP] Loaded', count, 'pairs');
@@ -690,12 +773,19 @@
         break;
 
       case 'AWAIT_VERDICT':
+        // Check human presence
+        if (hunterHumanSuspended) {
+          setDebug('👤 Human typing — Hunter idle');
+          break; // Don't process verdict while human is typing
+        }
+
         const verdict = detectVerdict();
         if (verdict === 'incorrect') {
           hunterScore.incorrect++;
           hunterScore.total++;
 
           console.log('[Hunter] Verdict: INCORRECT');
+          recordTelemetry('incorrect', { question: hunterQuestion });
 
           // ── Learn from Error (Policy B) ──
           if (CFG.hunter.errorPolicy === 'learn' || CFG.hunter.errorPolicy === 'hybrid') {
@@ -704,8 +794,13 @@
               hunterLearned = { word: hunterQuestion, answer: learned };
               showToast(`🧠 Learned: "${hunterQuestion}" → "${learned}"`);
               setDebug(`🧠 Learned: "${hunterQuestion}" → "${learned}"`);
+              recordTelemetry('learned', { question: hunterQuestion, answer: learned });
+
+              // Tag with confidence
+              if (CFG.hunter.trackConfidence) {
+                updateConfidence(norm(hunterQuestion), 'learned');
+              }
             } else if (CFG.hunter.errorPolicy === 'hybrid') {
-              // Hybrid: if we couldn't learn, fall back to dismiss
               console.log('[Hunter] Hybrid: could not learn, falling back to dismiss');
             }
           }
@@ -724,17 +819,28 @@
           }
 
           updateHunterDebug();
+          adaptThreshold();
+          adaptTypingSpeed();
 
         } else if (verdict === 'correct') {
           hunterScore.correct++;
           hunterScore.total++;
 
           console.log('[Hunter] Verdict: CORRECT — advancing');
+          recordTelemetry('correct', { question: hunterQuestion });
+
+          // Update confidence for verified correct answer
+          if (CFG.hunter.trackConfidence && hunterQuestion) {
+            updateConfidence(norm(hunterQuestion), 'verified');
+          }
+
           showToast('✅ Correct — advancing');
           setDebug('✅ Correct — advancing');
           hunterState = 'ADVANCE';
 
           updateHunterDebug();
+          adaptThreshold();
+          adaptTypingSpeed();
 
         } else if (verdict === 'unknown') {
           // Question text disappeared — question is done, just advance
@@ -820,6 +926,226 @@
     setDebug(msg);
   }
 
+  // ── Confidence Tracking ════════════════════════════════════════════════════
+
+  /**
+   * Get the confidence score for a normalized answer key.
+   * Returns a number: 0 = unknown, 1 = from grid, 0.5 = learned, 1+ = verified.
+   */
+  function getConfidence(key) {
+    if (!CFG.hunter.trackConfidence) return 1;
+    const entry = confidenceMap[key];
+    return entry ? entry.score : 0;
+  }
+
+  /**
+   * Update the confidence score for a normalized key.
+   */
+  function updateConfidence(key, source) {
+    if (!CFG.hunter.trackConfidence) return;
+    if (!confidenceMap[key]) {
+      confidenceMap[key] = { score: 0, source: source, count: 0 };
+    }
+    const entry = confidenceMap[key];
+    entry.count++;
+
+    if (source === 'grid') entry.score = 1.0;
+    else if (source === 'learned') entry.score = Math.max(entry.score, 0.5);
+    else if (source === 'verified') entry.score = Math.min(entry.score + 0.2, 1.5);
+
+    // Persist periodically
+    try {
+      localStorage.setItem(CONFIDENCE_KEY, JSON.stringify(confidenceMap));
+    } catch (e) { /* ignore */ }
+  }
+
+  /**
+   * Load confidence scores from localStorage.
+   */
+  function loadConfidence() {
+    if (!CFG.hunter.trackConfidence) return;
+    try {
+      const stored = localStorage.getItem(CONFIDENCE_KEY);
+      if (stored) confidenceMap = JSON.parse(stored);
+    } catch (e) { /* ignore */ }
+  }
+
+  // ── Self-Healing Answers ═══════════════════════════════════════════════════
+
+  /**
+   * Enhanced version of stripAlts that also handles:
+   * - Multiple semicolons: "bonjour;salut;hello" → stores all alternates
+   * - Hint trailers: "de rien (← hint)" → "de rien"
+   * - Accent markers: "français with accent" → "français"
+   */
+  function smartStrip(s) {
+    if (!s) return s;
+    let result = s.trim();
+    // Strip parenthetical hints: "word (← hint)" or "word (with accent)"
+    result = result.replace(/\s*\([^)]*\)\s*$/, '').trim();
+    // Strip trailing phrases like "with accent"
+    result = result.replace(/\s+with\s+accent\s*$/i, '').trim();
+    return result;
+  }
+
+  /**
+   * Parse a semicolon-separated answer into multiple alternates.
+   * Returns an array of stripped answers.
+   */
+  function parseAlts(s) {
+    if (!s) return [s];
+    const parts = s.split(';').map(p => smartStrip(p.trim())).filter(Boolean);
+    return parts.length > 0 ? parts : [s];
+  }
+
+  /**
+   * Enhanced version of findAnswer that uses confidence scores.
+   * When multiple matches exist, prefers the one with highest confidence.
+   */
+  function findAnswerWithConfidence(raw) {
+    const q = norm(raw);
+    if (!q) return null;
+
+    // Exact match first
+    if (answerMap[q]) return answerMap[q];
+
+    // Substring match
+    for (const [k, v] of Object.entries(answerMap)) {
+      if (k.includes(q) || q.includes(k)) {
+        if (CFG.hunter.trackConfidence) {
+          const conf = getConfidence(k);
+          if (conf >= 0.3) return v;
+        } else {
+          return v;
+        }
+      }
+    }
+
+    // Fuzzy match with confidence preference
+    let best = 0, bestVal = null, bestConf = 0;
+    for (const [k, v] of Object.entries(answerMap)) {
+      const sc = similarity(q, k);
+      if (sc >= CFG.fuzzyThreshold && sc > best) {
+        const conf = getConfidence(k);
+        if (conf > bestConf || (conf === bestConf && sc > best)) {
+          best = sc;
+          bestVal = v;
+          bestConf = conf;
+        }
+      }
+    }
+
+    // Track score for adaptive threshold
+    if (CFG.hunter.adaptiveThreshold && best > 0) {
+      adaptiveScores.push(best);
+      if (adaptiveScores.length > ADAPTIVE_WINDOW) adaptiveScores.shift();
+    }
+
+    return bestVal;
+  }
+
+  // ── Adaptive Fuzzy Threshold ═══════════════════════════════════════════════
+
+  /**
+   * Self-tune the fuzzy threshold based on the distribution of recent scores.
+   * If many matches are landing near the boundary, raise it.
+   * If many questions are missing by a hair, lower it.
+   */
+  function adaptThreshold() {
+    if (!CFG.hunter.adaptiveThreshold || adaptiveScores.length < 5) return;
+
+    const avg = adaptiveScores.reduce((a, b) => a + b, 0) / adaptiveScores.length;
+    const min = Math.min(...adaptiveScores);
+
+    if (avg > CFG.fuzzyThreshold * 1.5 && CFG.fuzzyThreshold < adaptiveMaxThreshold) {
+      // Most matches are well above threshold — we can be more strict
+      CFG.fuzzyThreshold = Math.min(CFG.fuzzyThreshold + 1, adaptiveMaxThreshold);
+      console.log('[Adaptive] Raised threshold to', CFG.fuzzyThreshold);
+    } else if (min < CFG.fuzzyThreshold * 0.8 && CFG.fuzzyThreshold > adaptiveMinThreshold) {
+      // Some matches are barely above — be more lenient
+      CFG.fuzzyThreshold = Math.max(CFG.fuzzyThreshold - 1, adaptiveMinThreshold);
+      console.log('[Adaptive] Lowered threshold to', CFG.fuzzyThreshold);
+    }
+  }
+
+  // ── Adaptive Typing Speed ══════════════════════════════════════════════════
+
+  /**
+   * Adjust typeDelay based on success rate. If we're getting >90% correct,
+   * we can type faster. If we're getting <70% correct, slow down.
+   */
+  function adaptTypingSpeed() {
+    if (!CFG.hunter.adaptiveSpeed) return;
+    const total = hunterScore.correct + hunterScore.incorrect;
+    if (total < 5) return; // not enough data
+
+    const pct = hunterScore.correct / total;
+    if (pct > 0.9 && CFG.typeDelay > 0) {
+      CFG.typeDelay = Math.max(0, CFG.typeDelay - 2);
+      console.log('[Adaptive] Speed up: typeDelay =', CFG.typeDelay);
+    } else if (pct < 0.7) {
+      CFG.typeDelay = Math.min(50, CFG.typeDelay + 5);
+      console.log('[Adaptive] Slow down: typeDelay =', CFG.typeDelay);
+    }
+  }
+
+  // ── Telemetry ══════════════════════════════════════════════════════════════
+
+  /**
+   * Record a telemetry event for the current session.
+   */
+  function recordTelemetry(event, data) {
+    if (!CFG.hunter.telemetry) return;
+    try {
+      if (!telemetryData) {
+        const stored = localStorage.getItem(TELEMETRY_KEY);
+        telemetryData = stored ? JSON.parse(stored) : { sessions: [] };
+      }
+
+      const today = new Date().toISOString().split('T')[0];
+      let session = telemetryData.sessions.find(s => s.date === today);
+      if (!session) {
+        session = { date: today, correct: 0, incorrect: 0, learned: 0, time: 0, questions: [] };
+        telemetryData.sessions.push(session);
+        // Keep only last 30 days
+        if (telemetryData.sessions.length > 30) telemetryData.sessions.shift();
+      }
+
+      if (event === 'correct') session.correct++;
+      else if (event === 'incorrect') session.incorrect++;
+      else if (event === 'learned') session.learned++;
+
+      if (data) session.questions.push(data);
+
+      localStorage.setItem(TELEMETRY_KEY, JSON.stringify(telemetryData));
+    } catch (e) { /* ignore */ }
+  }
+
+  /**
+   * Export telemetry data as a downloadable JSON file.
+   */
+  function exportTelemetry() {
+    try {
+      const stored = localStorage.getItem(TELEMETRY_KEY);
+      if (!stored) {
+        showToast('📊 No telemetry data yet');
+        return;
+      }
+
+      const blob = new Blob([stored], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `ep-telemetry-${new Date().toISOString().split('T')[0]}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('📊 Telemetry exported');
+    } catch (e) {
+      console.warn('[Telemetry] Export failed:', e);
+      showToast('⚠️ Export failed');
+    }
+  }
+
   /**
    * Start the Hunter loop. Called when the user toggles Hunter on.
    */
@@ -828,6 +1154,12 @@
 
     // Load previously learned pairs from localStorage
     loadLearnedAnswers();
+
+    // Load confidence scores
+    loadConfidence();
+
+    // Reset adaptive state
+    adaptiveScores = [];
 
     hunterEnabled = true;
     hunterState = 'IDLE';
@@ -838,6 +1170,8 @@
     hunterQuestionStart = 0;
     hunterLearned = null;
     hunterNoAdvanceCount = 0;
+    hunterHumanActive = false;
+    hunterHumanSuspended = false;
 
     hunterTimer = setInterval(hunterTick, 500);
     console.log('[Hunter] Started');
@@ -1001,6 +1335,9 @@
           <button class="ep-btn" id="ep-hunter">🕵️ Hunter</button>
           <button class="ep-btn skip-btn" id="ep-skip">⏭ Skip</button>
         </div>
+        <div id="ep-btns3" style="display:flex;gap:5px;margin-bottom:4px">
+          <button class="ep-btn" id="ep-export" style="font-size:10px;min-width:auto;flex:0.5">📊 Export</button>
+        </div>
         <div id="ep-hint">Select a task to activate.</div>
         <div id="ep-debug"></div>
       </div>
@@ -1014,6 +1351,7 @@
     aiBtn      = panel.querySelector('#ep-ai');
     hunterBtn  = panel.querySelector('#ep-hunter');
     skipBtn    = panel.querySelector('#ep-skip');
+    const exportBtn = panel.querySelector('#ep-export');
  
     autoBtn.addEventListener('click', () => {
       showToast('Auto mode');
@@ -1051,6 +1389,13 @@
     skipBtn.addEventListener('click', () => {
       skipToNextTask();
     });
+
+    // ── Export button ──
+    if (exportBtn) {
+      exportBtn.addEventListener('click', () => {
+        exportTelemetry();
+      });
+    }
 
     makeDraggable(panel, panel.querySelector('#ep-handle'));
     updatePanelVisibility();
@@ -1113,6 +1458,8 @@
     const hunterBtn = document.querySelector('#ep-hunter');
     const skipBtn   = document.querySelector('#ep-skip');
     const btns2Row  = document.querySelector('#ep-btns2');
+    const btns3Row  = document.querySelector('#ep-btns3');
+    const exportBtn = document.querySelector('#ep-export');
     const hintTxt   = document.querySelector('#ep-hint');
     const debugTxt  = document.querySelector('#ep-debug');
  
@@ -1127,6 +1474,13 @@
     if (btns2Row)  btns2Row.style.display  = isTaskPage ? 'flex' : 'none';
     if (hunterBtn) hunterBtn.style.display = isTaskPage ? '' : 'none';
     if (skipBtn)   skipBtn.style.display   = isTaskPage ? '' : 'none';
+
+    // Show Export button always (visible when panel is visible)
+    if (btns3Row)  btns3Row.style.display  = 'flex';
+    if (exportBtn) {
+      exportBtn.title = 'Export telemetry data';
+      exportBtn.style.display = '';
+    }
  
     if (hintTxt) hintTxt.style.display = hints ? '' : 'none';
     if (vocabUnlocked) hintTxt.innerHTML = hintsList.list;
