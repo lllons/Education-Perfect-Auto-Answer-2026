@@ -24,9 +24,9 @@ The implement folder contains the html layout of different areas around educatio
 
 ### Branches
 
-**`main`** — This is the **stable** version. It is reliable, well-tested, and recommended for everyday use. (Not infused with AI right now)
+**`main`** — This is the **Hunter** version. It is still in develoment. (Not infused with AI right now)
 
-**`Published`** — This is the **GreasyFork** version. It is the script that is hosted on GreasyFork. (Great speed, no AI as of the moment)
+**`Published`** — This is the **GreasyFork** version. It is the script that is hosted on GreasyFork. **RECOMENDED FOR ALL** (Great speed, no AI as of the moment)
 
 **`full`** — This is the **AI-powered beta branch**. It uses advanced AI for significantly better question understanding and answer accuracy. The **full** branch is actively getting the latest improvements and experimental features. 
 
