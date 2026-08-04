@@ -249,6 +249,13 @@
   let hunterLastPageUrl      = '';   // detect SPA route changes
   let hunterLastActiveMs     = 0;    // last tick observed activity on the page
 
+  // ─── Phase 4: progress + ETA ─────────────────────────────────
+  // Rolling avg of ms spent per question (excluding the last one so a long
+  // current question doesn't poison the ETA). 80-sample sliding window.
+  let hunterQuestionTimes    = [];   // most recent first
+  let hunterQuestionStartMs  = 0;
+  let hunterEtaTimer         = null;
+
   // ── Page-change / unload guards ───────────────────────────────────────────
   window.addEventListener('beforeunload', () => {
     pageChanging = true;
@@ -496,33 +503,71 @@
    *   - Returns null cleanly so the caller can fall back to dismiss.
    *  Selectors verified in `Implement/(5) EP (8_4_2026 3：48：24 PM).html`.
    */
+  /**
+   * Read the CORRECT answer out of the error modal. This is the highest-
+   * priority Learn path so it tries every signal in document order:
+   *   1. `#correct-answer-field` (the canonical EP "correct answer" cell)
+   *   2. The green spans inside `#users-answer-field` (the breakdown — the
+   *      correct portion is colored #0a0; red (#c00) is wrong)
+   *   3. `tr.correct` inside the modeless-answer-dialog
+   *   4. `.correct-popup` fallback
+   * Returns the cleaned answer or null.
+   */
   function scrapeCorrectAnswer() {
-    // 1. Direct id, anywhere in the DOM (the modal may or may not be visible).
-    const direct = document.getElementById('correct-answer-field');
-    if (direct && (direct.textContent || '').trim()) {
-      return cleanScrapedAnswer(direct.textContent);
+    // 1. Canonical EP field — verified in Implement/* (multiple files).
+    const canonical = document.getElementById('correct-answer-field');
+    if (canonical && (canonical.textContent || '').trim()) {
+      const t = cleanScrapedAnswer(canonical.textContent);
+      if (t) return t;
     }
-    // 2. Inside the modeless-answer-dialog.
+
+    // 2. Green-span reconstruction from #users-answer-field breakdown.
+    //    Inside there:
+    //      style="color:#0a0"           = part of the correct answer
+    //      style="color:#c00"           = user got this part wrong
+    //      style="color:rgba(0,0,0,.25)" = gray, partial correctness / hint
+    //    We concatenate ONLY the green spans in DOM order — they're the
+    //    parts the system knew were correct, regardless of what the user
+    //    typed.
+    const usersField = document.getElementById('users-answer-field');
+    if (usersField) {
+      const greenPieces = usersField.querySelectorAll('span[style*="color:#0a0"], span[style*="color: rgb(0, 170, 0)"], span[style*="rgb(0,170,0)"], span[style*="color:green"], span[class*="green"]');
+      if (greenPieces.length > 0) {
+        const merged = Array.from(greenPieces)
+          .map(s => (s.textContent || '').trim())
+          .filter(Boolean)
+          .join(' ')
+          .trim();
+        if (merged) {
+          const t = cleanScrapedAnswer(merged);
+          if (t) return t;
+        }
+      }
+      // Fallback to the whole breakdown text — it'll often contain the
+      // correct word(s) separated by EP's highlight formatting.
+      const full = cleanScrapedAnswer(usersField.textContent);
+      if (full) return full;
+    }
+
+    // 3. tr.correct inside the open dialog with the longest .native-font.
     const dialog = queryVisible('.modeless-answer-dialog');
     if (dialog) {
-      // The dialog has <tr.correct> and <tr.incorrect> rows — the correct
-      // row's last cell holds the user/answer text. We extract from the
-      // correct-row if present (it's the post-verdict correct-display),
-      // else from the field.
       const correct = dialog.querySelector('tr.correct');
       if (correct) {
         const fields = correct.querySelectorAll('.native-font, td');
         const text = lastFieldText(fields);
-        if (text) return cleanScrapedAnswer(text);
+        if (text) {
+          const t = cleanScrapedAnswer(text);
+          if (t) return t;
+        }
       }
-      const fieldsInDialog = dialog.querySelectorAll('#correct-answer-field, .field.native-font');
-      const text = lastFieldText(fieldsInDialog);
-      if (text) return cleanScrapedAnswer(text);
     }
-    // 3. Anywhere visible in the document — last-resort.
-    const anyField = queryVisible('#correct-answer-field, .correct-popup .native-font');
+
+    // 4. .correct-popup / any last-resort visible field.
+    const anyField = queryVisible('#correct-answer-field, .correct-popup .native-font, .correct-answer');
     if (anyField && (anyField.textContent || '').trim()) {
-      return cleanScrapedAnswer(anyField.textContent);
+      const t = cleanScrapedAnswer(anyField.textContent);
+      if (t) return t;
     }
     return null;
   }
@@ -870,6 +915,38 @@
   }
 
   // ── Clicks (Phase 2: more selectors, ng-disabled-aware) ───────────────────
+
+  /** Click the **Continue / “Next question” button** — Phase 4's preferred
+   *  post-error dismissal path. Tries in order:
+   *    1. `#continue-button` (verified in game-page HTML)
+   *       → outside the modal first (regular Next-question)
+   *       → then inside the modal footer (post-verdict "Next question")
+   *    2. `.modal-footer #continue-button`
+   *    3. `.modal-footer button` (any button in the modal footer)
+   *    4. Same fallbacks as clickAdvanceButton() (for the non-error case)
+   *  Returns true if anything was clicked.
+   */
+  function clickContinueButton() {
+    // 1. The exact EP `#continue-button` (priority 1A: outside modal, 1B: inside).
+    const selectors = [
+      '#continue-button:not([disabled])',
+      '.modal-footer #continue-button:not([disabled])',
+      '.modeless-answer-dialog #continue-button:not([disabled])',
+      '.modal-footer button.nice-button:not([disabled])',
+      '#continue-button',
+      '.modal-footer #continue-button',
+      '.modeless-answer-dialog #continue-button',
+    ];
+    for (const sel of selectors) {
+      const btn = queryVisible(sel);
+      if (btn && isEnabled(btn)) {
+        console.log('[Hunter] Clicking Continue:', sel, '·', (btn.textContent || '').trim().slice(0, 30));
+        if (safeClick(btn)) return true;
+      }
+    }
+    // 2. Fall through to the broader advance selector chain.
+    return clickAdvanceButton();
+  }
 
   /** Click the "Next question" button to advance past the current question.
    *  Phase 3 hardening:
@@ -1244,25 +1321,35 @@
         if (verdict === 'incorrect') {
           hunterScore.incorrect++;
           hunterQuestionsAnswered++;
+          recordQuestionDuration();
           console.log('[Hunter] Verdict: INCORRECT');
 
           const policy = CFG.hunter.errorPolicy;
+          let learned = null;
           if (policy === 'learn' || policy === 'hybrid') {
-            try { learnFromError(); }
+            try { learned = learnFromError(); }
             catch (e) { console.warn('[Hunter] learnFromError threw', e); }
           }
 
-          // Always dismiss the overlay. With 'learn'/'hybrid' the dismiss
-          // triggers a retry of the same question; tryFill() will answer
-          // correctly because answerMap was just updated.
-          dismissWrongAnswer();
+          // Phase 4 priority order:
+          //   1. Click `#continue-button` ("Next question") — the most
+          //      reliable path on every error modal layout we tested.
+          //   2. Fall back to broader dismissal only if that fails.
+          const continued = clickContinueButton();
+          if (!continued) dismissWrongAnswer();
           hunterDefer(() => {
             if (hunterState === 'AWAIT_VERDICT') hunterSetState('ADVANCE');
           }, CFG.hunter.advanceDelay);
+          if (learned) {
+            showToast('🧠 Learned “' + learned.slice(0, 22) + '” · Next...');
+          } else if (policy !== 'dismiss') {
+            showToast('❌ Wrong · continuing...');
+          }
           updateHunterDebug();
         } else if (verdict === 'correct') {
           hunterScore.correct++;
           hunterQuestionsAnswered++;
+          recordQuestionDuration();
           console.log('[Hunter] Verdict: CORRECT');
           setDebug('✅ Correct — advancing');
           hunterSetState('ADVANCE');
@@ -1270,6 +1357,7 @@
         } else if (verdict === 'unknown') {
           console.log('[Hunter] Verdict: UNKNOWN — advancing');
           hunterSetState('ADVANCE');
+          updateHunterDebug();
         }
         break;
       }
@@ -1391,8 +1479,64 @@
 
   // ── Debug / start / stop (Phase 2) ─────────────────────────────────────────
 
+  /** ── Phase 4: record the duration of a finished question so the rolling
+   *  ETA stays accurate. Keeps only the last 80 samples. */
+  function recordQuestionDuration() {
+    if (!hunterQuestionStartMs) return;
+    const dur = Date.now() - hunterQuestionStartMs;
+    if (dur > 0 && dur < 600000) {
+      hunterQuestionTimes.unshift(dur);
+      if (hunterQuestionTimes.length > 80) hunterQuestionTimes.pop();
+    }
+    hunterQuestionStartMs = Date.now();
+  }
+
+  /** Format `ms` as `Xm Ys` or `Ys`. Compact, easy to embed in toast / panel. */
+  function fmtDuration(ms) {
+    ms = Math.max(0, Math.round(ms / 1000));
+    if (ms < 60) return ms + 's';
+    const m = Math.floor(ms / 60);
+    const s = ms % 60;
+    return m + 'm ' + s + 's';
+  }
+
+  /** Update the progress badge element (added by Phase 4 CSS).
+   *  Format: `⚡ 37/120 · ~1m 12s left` (or `⚡ 4 questions · ~5s/q`). */
+  function updateProgressBadge() {
+    if (!hunterBadgeEl) return;
+    if (!hunterEnabled) {
+      hunterBadgeEl.style.display = 'none';
+      return;
+    }
+    hunterBadgeEl.style.display = '';
+    const total = hunterQuestionsAnswered;
+    const avg = hunterQuestionTimes.length
+      ? Math.round(hunterQuestionTimes.reduce((a, b) => a + b, 0) / hunterQuestionTimes.length)
+      : 0;
+    if (total === 0) {
+      hunterBadgeEl.textContent = '⚡ ready · measuring pace…';
+    } else if (avg > 0) {
+      hunterBadgeEl.textContent =
+        '⚡ ' + total + (avg >= 1000 ? ' answered' : ' answered') +
+        ' · ~' + fmtDuration(avg) + '/q';
+    } else {
+      hunterBadgeEl.textContent = '⚡ ' + total + ' answered';
+    }
+  }
+
+  /** Start the ETA updater (1Hz) so the badge stays live without layout thrash. */
+  function startEtaTicker() {
+    if (hunterEtaTimer) clearInterval(hunterEtaTimer);
+    hunterEtaTimer = setInterval(() => updateProgressBadge(), 1000);
+  }
+  function stopEtaTicker() {
+    if (hunterEtaTimer) { clearInterval(hunterEtaTimer); hunterEtaTimer = null; }
+    updateProgressBadge();
+  }
+
   /** Update the panel debug line with current Hunter progress + state emoji. */
   function updateHunterDebug() {
+    updateProgressBadge();
     if (!debugEl) return;
     const elapsed = hunterStartTime ? Math.floor((Date.now() - hunterStartTime) / 1000) : 0;
     const mins = Math.floor(elapsed / 60);
