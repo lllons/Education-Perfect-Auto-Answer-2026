@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         🎓 Education Perfect - Auto Answer (2026) 🎓
 // @namespace    https://educationperfect.com
-// @version      4.0.092
+// @version      4.0.093
 // @description  Auto-fills answers on Education Perfect. (Working 2026)
 // @author       lllons and Otjl12
 // @match        https://app.educationperfect.com/*
@@ -25,7 +25,7 @@
   const hints = true;
  
   const hintsList = {
-    list: "Auto-types at your cursor. Press Enter to submit.",
+    list: "Auto-types at your cursors selected location. Press Enter to submit.",
     activity: "Auto-selects or type the correct answer using AI.",
   }
  
