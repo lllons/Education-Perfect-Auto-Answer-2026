@@ -9,11 +9,13 @@
 
 ## Current Shipped State (as of `script.js` on `main`)
 
-**Only the v1 slice of this roadmap is currently landed.** Earlier exploratory
-spikes (v2: Learn policy / end-of-list autopilot / progress badge; v3: human-
-presence detector, confidence scoring, telemetry Export, adaptive threshold,
-adaptive typing speed, self-healing alternates) were prototyped and rolled
-back — the script currently contains **only the three pillars below**:
+**v1 + v2 + Phase 3 robustness** are all landed; the v3 exploratory spike
+(adaptive threshold, adaptive typing speed, confidence scoring, telemetry
+Export button, self-healing alternates) was rolled back. The script currently
+ships **only defensibility — no new user-visible features** — so what is in
+`CFG.hunter` matches what is wired into the Hunter tick.
+
+### Behaviour shipped
 
 1. **Auto-advance** — when the current question is graded correct or wrong,
    click `#continue-button` (the EP "Next question" button) and move to the
@@ -23,10 +25,50 @@ back — the script currently contains **only the three pillars below**:
    script is never stuck.
 3. **Skip list** — a new "Skip list" button on `#ep-panel` jumps straight to the
    next task in the sidebar of the list-starter page.
+4. **Learn & Hybrid policies** (`errorPolicy: 'learn' | 'hybrid'`, default
+   `'hybrid'`) — when EP reveals the correct answer in a wrong overlay, the
+   script scrapes it via `#correct-answer-field` / `.modeless-answer-dialog
+   tr.correct`, persists it to `localStorage.ep.learned`, and re-types it on
+   the retry.
+5. **End-of-list detection + auto-continue** (`autoContinueLists: false` by
+   default) — the script detects the list-complete screen and either walks
+   into the next available list or stops cleanly.
+6. **Human-presence detector** (`humanPresenceWindow: 1500` ms) — Hunter
+   pauses itself while a human is typing in the answer field.
+7. **Visible kill-switch STOP button** (`#ep-stop`) — dark-red button clears
+   every pending timer AND every event listener.
 
-Everything from §6.2 (Learn from Error), §7 (autonomous-thinking ideas), and
-most of §5.4 (end-of-list auto-continue) is **planned but not yet shipped**.
-Update the §10 status table when a new feature lands.
+### Defensive infrastructure shipped (Phase 3 — not a feature, a hardener)
+
+* **Universal DOM helpers** (`isVisible`, `isEnabled`, `queryVisible`,
+  `queryAllVisible`, `safeClick`, `clampMs`, `waitFor`, `isModalShown`) —
+  every element interaction goes through these before any click fires.
+* **Stuck-state watchdog** — if Hunter lingers in any state for more than
+  `CFG.hunter.stuckStateMs` (30 s default), force-reset to `IDLE`.
+* **Global inactivity watchdog** — if Hunter produces no state change for
+  `CFG.hunter.watchdogMs` (120 s default), force-reset (`🛟 Hunter reset`
+  toast).
+* **Tick try/catch** — a thrown bug in any helper resets to IDLE and never
+  kills the loop.
+* **`hunterDefer()`** — every `setTimeout` inside the Hunter life-cycle is
+  tracked in `hunterDelayedTimers` and clocked by `clampMs()` so a
+  misconfigured CFG cannot fire clicks during EP's animation frames.
+* **Hard cap on failed advance clicks** (`CFG.hunter.maxAdvanceAttempts: 5`)
+  — if `#continue-button` cannot be located 5 times in a row, Hunter stops
+  with a clear toast instead of looping forever.
+* **Safe ring-buffer for learned pairs** — paraphrased/punctoated scrapes
+  are stripped, length-capped at 200 chars, and dropped instead of poisoned.
+* **Defensive localStorage load** — a malformed `ep.learned` blob no longer
+  crashes Hunter; bad entries are skipped.
+
+### What is still planned (NOT shipped)
+
+* Adaptive fuzzy threshold (7.3)
+* Adaptive typing speed (7.4)
+* Per-word confidence scoring (7.9)
+* Telemetry opt-in + Export button (7.8)
+* Self-healing alternates (7.6)
+* Daily list-id progress persistence (post §5.4)
 
 ---
 
@@ -366,7 +408,36 @@ Status legend: ✅ shipped on `main` · 🟡 Planned — not in current release
 | Visible kill-switch STOP button | **Done** (Phase 2) | ✅ yes — `#ep-stop` button on the panel, dark red |
 | Skip-list button | **Done** (Phase 1) | ✅ yes — `#ep-skip` button |
 | IDLE auto-start on starter screens | **Done** (Phase 1) | ✅ yes — clicks `#start-button-main` / `#start-button-school` |
-| Progress badge (debug line only) | **Partial** — debug shows `🥷 N✓ N✗ · Xm Ys · STATE · "word"`; no ETA yet | ✅ partial |
+| Progress badge (debug line only) | **Partial** — debug shows `🕵️ N✓ N✗ · Xm Ys · STATE · "word"`; no ETA yet | ✅ partial |
+
+### Phase 3 (robustness hardening — defensibility only, no new user behaviour)
+
+| Item | State | In `script.js`? |
+|---|---|---|
+| Universal DOM helpers (`isVisible`, `isEnabled`, `safeClick`, `queryVisible`, `queryAllVisible`, `clampMs`, `waitFor`, `isModalShown`) | **Done** (Phase 3) | ✅ yes |
+| Stuck-state watchdog (`stuckStateMs: 30000`) | **Done** (Phase 3) | ✅ yes — `hunterWatchdog()` |
+| Global inactivity watchdog (`watchdogMs: 120000`) | **Done** (Phase 3) | ✅ yes — `hunterWatchdog()` |
+| Tick try/catch (any thrown bug resets state) | **Done** (Phase 3) | ✅ yes |
+| `hunterDefer()` tracking + `clampMs()` on every setTimeout | **Done** (Phase 3) | ✅ yes |
+| Hard cap on failed advance clicks (`maxAdvanceAttempts: 5`) | **Done** (Phase 3) | ✅ yes |
+| Defensive localStorage parser (drops malformed entries) | **Done** (Phase 3) | ✅ yes — `loadLearnedAnswers()` |
+| `scrapeCorrectAnswer` hygiene (strips `Correct answer:`, hint trailers, length cap, prefix/suffix noise) | **Done** (Phase 3) | ✅ yes — `cleanScrapedAnswer()` |
+| URL-change observer (resets Hunter to IDLE on SPA nav away) | **Done** (Phase 3) | ✅ yes — top of `hunterTick()` |
+| `skipToNextTask` fallback chain (`<li title>`, `<li.item>`, breadcrumb, multiple back-button selectors) | **Done** (Phase 3) | ✅ yes |
+| `addHumanListeners` / `removeHumanListeners` symmetric pair | **Done** (Phase 3) | ✅ yes — used by start/stop/STOP |
+| `clearHunterDelayedTimers` cleanup helper | **Done** (Phase 3) | ✅ yes |
+
+### Phase 4+ (planned, NOT shipped)
+
+| Item | State |
+|---|---|
+| Per-word confidence scoring (7.9) | 🟡 |
+| Adaptive fuzzy threshold (7.3) | 🟡 |
+| Adaptive typing speed (7.4) | 🟡 |
+| Self-healing alternates (7.6) | 🟡 |
+| Telemetry opt-in + Export button (7.8) | 🟡 |
+| Daily list-id progress persistence | 🟡 |
+| Detect in-game navigate to next-list | 🟡 |
 | Per-word confidence | Planned | 🟡 |
 | Adaptive fuzzy threshold | Planned | 🟡 |
 | Adaptive typing speed | Planned | 🟡 |
