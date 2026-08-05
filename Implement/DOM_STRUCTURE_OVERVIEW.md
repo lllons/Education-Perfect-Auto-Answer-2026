@@ -715,6 +715,97 @@ const isVocabPage = isListStarter;  // vocab loading only on list-starter
 
 ---
 
+First commit and push the current work with a clear message, then confirm the push succeeded.
+
+---
+
+Then implement the next improvements to **Hunter Mode list navigation**, using the exact DOM structures below.
+
+### Real navigation structure (use these)
+
+Education Perfect list browsing works like this:
+
+1. **Folder / breadcrumb level**
+   ```html
+   <div class="crumb-child item h-group v-align-center">
+     ...folder icon...
+     <div class="item-title fill">Vocabulary</div>
+     <div class="official-content">Official</div>
+   </div>
+   ```
+   and deeper folders such as:
+   ```html
+   <div class="item-title fill">Basic Vocabulary</div>
+   ```
+
+2. **Individual list / activity**
+   ```html
+   <div class="item-title fill">Body Parts</div>
+   <!-- or "Classroom objects" etc. -->
+   ```
+   These sit inside the folder view and represent the actual vocabulary lists.
+
+3. **Mode selection (after opening a list)**
+   ```html
+   <li class="item h-group v-align-center mode-1 selected" ...>
+     <div class="main-text">Writing</div>
+     <div class="sub-text">English Text to French</div>
+   </li>
+   ```
+   and the opposite direction:
+   ```html
+   <div class="sub-text">French Text to English</div>
+   ```
+
+4. **After answering – advance button**
+   ```html
+   <button id="continue-button" ...>Next question</button>
+   ```
+
+### What Hunter Mode must do with these
+
+When Hunter needs to move to another list (auto-continue or the “Skip whole list” button), follow this exact flow:
+
+1. Detect that the current list is finished (or the user clicked Skip).
+2. Navigate back to the folder view if necessary.
+3. Find the next available list by reading the `.item-title` elements (e.g. “Body Parts”, “Classroom objects”, etc.).
+4. Click the next list that has not been completed yet.
+5. On the mode-selection screen, prefer the **Writing** mode.  
+   - Choose “English Text to French” or “French Text to English” according to whatever the current session is using (or a configurable preference).
+6. Click the Start button (reuse the existing start-button logic already in `script.js`).
+7. Once inside the activity, normal Hunter Mode (answer → learn on error → click `#continue-button`) takes over again.
+
+### Concrete implementation tasks
+
+- Add reliable selectors for:
+  - Folder items (`.crumb-child.item` + `.item-title`)
+  - List/activity titles (`.item-title.fill`)
+  - Mode list items (`li.item` with `.main-text` = “Writing” and the two `.sub-text` directions)
+  - `#continue-button`
+- Write a clear `findNextList()` (or equivalent) function that walks the visible list of `.item-title` elements and returns the next uncompleted one.
+- Make both **auto-continue lists** and the **Skip whole list** button use this new navigation logic.
+- Keep using the highest-priority error path: learn correct answer → click `#continue-button`.
+- Do not hard-code list names; always read them live from the DOM.
+
+### Mandatory documentation updates (every time)
+After the code changes:
+
+1. Update `Implement/HUNTER_MODE_ROADMAP.md` – mark the new navigation work as done and note the folder → list → mode → start flow.
+2. Update the DOM layout reference with the new selectors (folders, item-titles, mode list, `#continue-button`).
+3. Update the AI context file with a short description of how Hunter now finds and starts the next list.
+
+### Rules
+- Search **all** HTML files in the folder for every selector.
+- Re-use existing start-button and state-machine logic.
+- Everything stays behind `hunter.enabled` and the `hunter: {}` config.
+- Pure DOM only.
+- Do not break previous phases.
+
+### Deliverable
+1. Commit + push of previous work.
+2. Updated `script.js` that can reliably walk folders → pick the next list → choose Writing mode → start it → then continue normal Hunter answering.
+3. Updated roadmap, DOM layout reference, and AI context file.<div theme-hover-background-color="accentColorLight" theme-active-background-color="accentColorLight" class="crumb-child item h-group v-align-center"><div data-v-44fdd2a3="" class="eds-mr-100 EdsSetTheme_variant-type-one_iscs6 EdsSetTheme_variant-type-one--theme-type-two_1e7KR"><div data-v-44fdd2a3="" class="h-group h-align-center v-align-center folder-icon"><svg data-v-44fdd2a3="" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-labelledby="e13b5759-b971-4c8d-9b8b-f94620fa5b82" class="EdsIcon_eds-component_24CuF EdsIcon_base-theme_2Vikr EdsIcon_variant-type-one--large_1KtD8" style="--eds-icon-color: #6b748e;"><title id="e13b5759-b971-4c8d-9b8b-f94620fa5b82" lang="en">folder icon</title><g class="EdsIcon_variant-type-one__group_UZVhj"><path data-v-44fdd2a3="" d="M10.731 5.516A1.832 1.832 0 009.453 5H4.8c-.99 0-1.791.787-1.791 1.75L3 17.25c0 .962.81 1.75 1.8 1.75h14.4c.99 0 1.8-.788 1.8-1.75V9.5c0-.963-.81-1.75-1.8-1.75H12l-1.269-2.234z"></path></g></svg> <!----></div></div> <div class="item-title fill">Vocabulary</div> <div theme-color="accentColor" theme-background-color="accentColorLight" class="official-content"> Official </div></div><div theme-hover-background-color="accentColorLight" theme-active-background-color="accentColorLight" class="crumb-child item h-group v-align-center"><div data-v-44fdd2a3="" class="eds-mr-100 EdsSetTheme_variant-type-one_iscs6 EdsSetTheme_variant-type-one--theme-type-two_1e7KR"><div data-v-44fdd2a3="" class="h-group h-align-center v-align-center folder-icon"><svg data-v-44fdd2a3="" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-labelledby="977fb6b9-7779-4383-94ea-56f7072f08ce" class="EdsIcon_eds-component_24CuF EdsIcon_base-theme_2Vikr EdsIcon_variant-type-one--large_1KtD8" style="--eds-icon-color: #6b748e;"><title id="977fb6b9-7779-4383-94ea-56f7072f08ce" lang="en">folder icon</title><g class="EdsIcon_variant-type-one__group_UZVhj"><path data-v-44fdd2a3="" d="M10.731 5.516A1.832 1.832 0 009.453 5H4.8c-.99 0-1.791.787-1.791 1.75L3 17.25c0 .962.81 1.75 1.8 1.75h14.4c.99 0 1.8-.788 1.8-1.75V9.5c0-.963-.81-1.75-1.8-1.75H12l-1.269-2.234z"></path></g></svg> <!----></div></div> <div class="item-title fill">Basic Vocabulary</div></div><div class="item-title fill">Classroom objects</div><div theme-hover-background-color="accentColorLight" theme-active-background-color="accentColorLight" class="crumb-child item h-group v-align-center"><div data-v-614e6d2e="" class="eds-mr-100 EdsSetTheme_variant-type-one_iscs6 EdsSetTheme_variant-type-one--theme-type-two_1e7KR"><div data-v-614e6d2e="" class="activity-icon h-group h-align-center v-align-center"><svg data-v-614e6d2e="" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-labelledby="bea1a65f-334a-4217-adfe-ad6c858e4b48" class="EdsIcon_eds-component_24CuF EdsIcon_base-theme_2Vikr EdsIcon_variant-type-one--large_1KtD8" style="--eds-icon-color: #6b748e;"><title id="bea1a65f-334a-4217-adfe-ad6c858e4b48" lang="en">Translation list</title><g class="EdsIcon_variant-type-one__group_UZVhj"><path data-v-614e6d2e="" d="M5.25 3H16.5L21 7.5v11.25c0 1.24-1 2.25-2.25 2.25H5.25C4.01 21 3 20 3 18.75V5.25C3 4.01 4 3 5.25 3z" fill="#4f46e5"></path><path data-v-614e6d2e="" d="M10.5 6c.4 0 .72.3.75.7v.05h2.25c.41 0 .75.34.75.75 0 .4-.3.72-.7.75h-.8V9a3 3 0 01-1.12 2.34l-.25.2.77.58c.14-.09.3-.17.47-.24.45-.18 1-.27 1.68-.27.74 0 1.33.09 1.76.26.43.18.73.46.9.84.18.38.27.89.27 1.52v1.18l-.01.76c0 .32.05.65.16 1l.02.08.05.16.03.13.03.11.01.1.01.09c0 .17-.08.33-.24.48a.82.82 0 01-.56.21c-.17 0-.34-.08-.51-.25-.18-.16-.36-.4-.55-.7-.4.31-.8.55-1.19.71-.38.16-.81.24-1.3.24-.43 0-.8-.09-1.14-.26a1.84 1.84 0 01-1.03-1.66c0-.46.15-.86.44-1.19.27-.3.64-.5 1.1-.63l.2-.05 1.03-.2.42-.1.25-.06.12-.02 1-.27a1.77 1.77 0 00-.28-.98c-.16-.21-.49-.32-1-.32-.42 0-.75.06-.97.18-.21.12-.4.3-.56.54l-.14.22-.07.1-.07.1-.05.06c-.06.08-.2.11-.41.11a.72.72 0 01-.5-.18.6.6 0 01-.2-.47v-.08l-1.2-.9-2.17 1.63a.75.75 0 01-.45.15.75.75 0 01-.75-.75c0-.23.1-.41.26-.55l.05-.04-.01-.01 1.82-1.37-.17-.13a3 3 0 01-1.2-2.29V9H9c0 .47.21.89.55 1.16l.06.05.51.38.51-.38c.36-.26.6-.66.62-1.12v-.84h-4.5A.75.75 0 016 7.5c0-.4.3-.72.7-.75H9c0-.4.3-.72.7-.75h.8zm5.06 9.11l-.07.03c-.1.04-.24.07-.38.11l-.23.06-.26.06-.63.14-.35.08-.15.04a1.2 1.2 0 00-.52.28.72.72 0 00-.25.58c0 .26.1.47.29.66.2.18.45.27.76.27a2 2 0 00.94-.22c.28-.15.49-.34.62-.57.14-.24.22-.63.23-1.16v-.36z" fill="#ffffff"></path></g></svg> <div data-v-614e6d2e="" class="activity-icon__status"><div data-v-2ca5d1d6="" data-v-614e6d2e="" class="EdsSetTheme_variant-type-one_iscs6 EdsSetTheme_variant-type-one--theme-type-two_1e7KR"><div data-v-2ca5d1d6="" class="h-group h-align-center v-align-center"><div data-v-2ca5d1d6="" class="status status--none status--large"><!----> <!----> <!----></div></div></div></div></div></div> <div class="item-title fill">Body Parts</div> <!----> <!----></div><li class="item h-group v-align-center mode-1 selected" ng-repeat="item in starter.availableModes" ng-click="starter.selectLearningMode(item)" ng-class="{ selected: item.id === starter.selectedMode.id, 'quiz-locked': starter.isDashMode &amp;&amp; (!starter.quizService.isModeUnlockedForLPMode(item.id) || !starter.dashAvailableForMode(item.id)) }" style=""> <div class="icon" ng-attr-mode="{{ ::item.name }}" mode="Writing"></div> <div class="v-group"> <div class="h-group"> <div class="main-text ng-binding">Writing</div> <!-- ngIf: starter.selectedMode.id == 8 && item.id == 8 --> </div> <div class="sub-text ng-binding">English Text to French</div> <!-- ngIf: !starter.isDashMode --><div ng-if="!starter.isDashMode" ng-show="item.percentage &gt; 0" ng-class="{ learnt: item.percentage == 100 }" class="percentage-label ng-binding ng-scope ng-hide"> 0%</div><!-- end ngIf: !starter.isDashMode --> <!-- ngIf: starter.isDashMode && starter.dashAvailableForMode(item.id) && !starter.quizService.isModeUnlockedForLPMode(item.id) --> <!-- ngIf: starter.isDashMode && !starter.dashAvailableForMode(item.id) && item.id != 8 --> <!-- ngIf: starter.isDashMode && !starter.dashAvailableForMode(item.id) && item.id == 8 --> </div> </li><div class="sub-text ng-binding">French Text to English</div> and this is the move to the next questino when it appers <button class="nice-button ng-binding" id="continue-button" ng-click="self.continueButtonClicked()" ng-disabled="self.continueButtonDisabled"> Next question </button> make me a promt using all of these and there places bcause one of tehem is the menu then the menu in side that go into a folder and then in that folder then eaither the writing english or "language" button then start and normal scripf then just make sure to say what all of these do and how to use them and makeing sure that hunter mode uses these while searching for other lists to do<button class="nice-button ng-binding" id="continue-button" ng-click="self.continueButtonClicked()" ng-disabled="self.continueButtonDisabled"> Next question </button><div class="sub-text ng-binding">French Text to English</div><li class="item h-group v-align-center mode-1 selected" ng-repeat="item in starter.availableModes" ng-click="starter.selectLearningMode(item)" ng-class="{ selected: item.id === starter.selectedMode.id, 'quiz-locked': starter.isDashMode &amp;&amp; (!starter.quizService.isModeUnlockedForLPMode(item.id) || !starter.dashAvailableForMode(item.id)) }" style=""> <div class="icon" ng-attr-mode="{{ ::item.name }}" mode="Writing"></div> <div class="v-group"> <div class="h-group"> <div class="main-text ng-binding">Writing</div> <!-- ngIf: starter.selectedMode.id == 8 && item.id == 8 --> </div> <div class="sub-text ng-binding">English Text to French</div> <!-- ngIf: !starter.isDashMode --><div ng-if="!starter.isDashMode" ng-show="item.percentage &gt; 0" ng-class="{ learnt: item.percentage == 100 }" class="percentage-label ng-binding ng-scope ng-hide"> 0%</div><!-- end ngIf: !starter.isDashMode --> <!-- ngIf: starter.isDashMode && starter.dashAvailableForMode(item.id) && !starter.quizService.isModeUnlockedForLPMode(item.id) --> <!-- ngIf: starter.isDashMode && !starter.dashAvailableForMode(item.id) && item.id != 8 --> <!-- ngIf: starter.isDashMode && !starter.dashAvailableForMode(item.id) && item.id == 8 --> </div> </li><div theme-hover-background-color="accentColorLight" theme-active-background-color="accentColorLight" class="crumb-child item h-group v-align-center"><div data-v-614e6d2e="" class="eds-mr-100 EdsSetTheme_variant-type-one_iscs6 EdsSetTheme_variant-type-one--theme-type-two_1e7KR"><div data-v-614e6d2e="" class="activity-icon h-group h-align-center v-align-center"><svg data-v-614e6d2e="" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-labelledby="bea1a65f-334a-4217-adfe-ad6c858e4b48" class="EdsIcon_eds-component_24CuF EdsIcon_base-theme_2Vikr EdsIcon_variant-type-one--large_1KtD8" style="--eds-icon-color: #6b748e;"><title id="bea1a65f-334a-4217-adfe-ad6c858e4b48" lang="en">Translation list</title><g class="EdsIcon_variant-type-one__group_UZVhj"><path data-v-614e6d2e="" d="M5.25 3H16.5L21 7.5v11.25c0 1.24-1 2.25-2.25 2.25H5.25C4.01 21 3 20 3 18.75V5.25C3 4.01 4 3 5.25 3z" fill="#4f46e5"></path><path data-v-614e6d2e="" d="M10.5 6c.4 0 .72.3.75.7v.05h2.25c.41 0 .75.34.75.75 0 .4-.3.72-.7.75h-.8V9a3 3 0 01-1.12 2.34l-.25.2.77.58c.14-.09.3-.17.47-.24.45-.18 1-.27 1.68-.27.74 0 1.33.09 1.76.26.43.18.73.46.9.84.18.38.27.89.27 1.52v1.18l-.01.76c0 .32.05.65.16 1l.02.08.05.16.03.13.03.11.01.1.01.09c0 .17-.08.33-.24.48a.82.82 0 01-.56.21c-.17 0-.34-.08-.51-.25-.18-.16-.36-.4-.55-.7-.4.31-.8.55-1.19.71-.38.16-.81.24-1.3.24-.43 0-.8-.09-1.14-.26a1.84 1.84 0 01-1.03-1.66c0-.46.15-.86.44-1.19.27-.3.64-.5 1.1-.63l.2-.05 1.03-.2.42-.1.25-.06.12-.02 1-.27a1.77 1.77 0 00-.28-.98c-.16-.21-.49-.32-1-.32-.42 0-.75.06-.97.18-.21.12-.4.3-.56.54l-.14.22-.07.1-.07.1-.05.06c-.06.08-.2.11-.41.11a.72.72 0 01-.5-.18.6.6 0 01-.2-.47v-.08l-1.2-.9-2.17 1.63a.75.75 0 01-.45.15.75.75 0 01-.75-.75c0-.23.1-.41.26-.55l.05-.04-.01-.01 1.82-1.37-.17-.13a3 3 0 01-1.2-2.29V9H9c0 .47.21.89.55 1.16l.06.05.51.38.51-.38c.36-.26.6-.66.62-1.12v-.84h-4.5A.75.75 0 016 7.5c0-.4.3-.72.7-.75H9c0-.4.3-.72.7-.75h.8zm5.06 9.11l-.07.03c-.1.04-.24.07-.38.11l-.23.06-.26.06-.63.14-.35.08-.15.04a1.2 1.2 0 00-.52.28.72.72 0 00-.25.58c0 .26.1.47.29.66.2.18.45.27.76.27a2 2 0 00.94-.22c.28-.15.49-.34.62-.57.14-.24.22-.63.23-1.16v-.36z" fill="#ffffff"></path></g></svg> <div data-v-614e6d2e="" class="activity-icon__status"><div data-v-2ca5d1d6="" data-v-614e6d2e="" class="EdsSetTheme_variant-type-one_iscs6 EdsSetTheme_variant-type-one--theme-type-two_1e7KR"><div data-v-2ca5d1d6="" class="h-group h-align-center v-align-center"><div data-v-2ca5d1d6="" class="status status--none status--large"><!----> <!----> <!----></div></div></div></div></div></div> <div class="item-title fill">Body Parts</div> <!----> <!----></div><div theme-hover-background-color="accentColorLight" theme-active-background-color="accentColorLight" class="crumb-child item h-group v-align-center"><div data-v-44fdd2a3="" class="eds-mr-100 EdsSetTheme_variant-type-one_iscs6 EdsSetTheme_variant-type-one--theme-type-two_1e7KR"><div data-v-44fdd2a3="" class="h-group h-align-center v-align-center folder-icon"><svg data-v-44fdd2a3="" role="img" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-labelledby="977fb6b9-7779-4383-94ea-56f7072f08ce" class="EdsIcon_eds-component_24CuF EdsIcon_base-theme_2Vikr EdsIcon_variant-type-one--large_1KtD8" style="--eds-icon-color: #6b748e;"><title id="977fb6b9-7779-4383-94ea-56f7072f08ce" lang="en">folder icon</title><g class="EdsIcon_variant-type-one__group_UZVhj"><path data-v-44fdd2a3="" d="M10.731 5.516A1.832 1.832 0 009.453 5H4.8c-.99 0-1.791.787-1.791 1.75L3 17.25c0 .962.81 1.75 1.8 1.75h14.4c.99 0 1.8-.788 1.8-1.75V9.5c0-.963-.81-1.75-1.8-1.75H12l-1.269-2.234z"></path></g></svg> <!----></div></div> <div class="item-title fill">Basic Vocabulary</div></div><div class="item-title fill">Classroom objects</div>
+
 > **Last updated:** August 5, 2026 (after the morning snapshots arrived)
 > **Source files:** all 8 `Implement/*.html` snapshots
 > **Companion docs:** `Implement/HUNTER_MODE_ROADMAP.md` — current status,
