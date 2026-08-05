@@ -29,7 +29,7 @@
     activity: "Auto-selects or type the correct answer using AI.",
   };
 
-  // ── Hunter Mode Config (Phase 2 + Phase 3 + Phase 4) ────────────────────────
+  // ── Hunter Mode Config (Phase 2 + Phase 3 + Phase 4 + Phase 5) ──────────────
   // Per-flag notes:
   //   enabled            master toggle; default OFF (user must opt in)
   //   advanceDelay       ms after verdict before clicking Next
@@ -50,6 +50,9 @@
   //                         EP's animation frames).
   //   safeMaxDelayMs       upper bound for any setTimeout (sanity).
   //   watchdogMs           if no state change for this many ms, force-reset.
+  // ── Phase 5 navigation ──
+  //   modeDirection        'auto' preserves the current Writing direction;
+  //                        explicit values select English↔French.
   const CFG = {
     fuzzyThreshold : 10,
     typeDelay      : 0,
@@ -64,6 +67,9 @@
       errorPolicy        : 'hybrid',
       autoStart          : true,
       autoContinueLists  : false,
+      // 'auto' preserves the current Writing direction; explicit values are
+      // 'english-to-french' or 'french-to-english'.
+      modeDirection      : 'auto',
       maxQuestionsPerRun : 0,
       humanPresenceWindow: 1500,
       // ── Phase 3 additions ──
@@ -83,6 +89,18 @@
     baseLang          : '.baseLanguage.question-label',
     answerInput       : '#answer-text',
     prompt            : '.prompt.ng-binding',
+  };
+
+  // Navigation selectors are intentionally based on the live EP structures
+  // found in every Implement/*.html snapshot. Keep folders and activities
+  // separate: both can contain `.item-title.fill`, but only folders contain
+  // `.folder-icon`.
+  const NAV_SEL = {
+    folderItems       : '.crumb-child.item',
+    listTitles        : '.item-title.fill',
+    modeItems         : 'li.item',
+    continueButton    : '#continue-button',
+    startButtons       : ['#start-button-main', '#preview-header-start-button', '#start-button-school'],
   };
 
   // ── Module-level constants ────────────────────────────────────────────────
@@ -251,6 +269,14 @@
   let hunterTypingTransitionScheduled = false;
   let hunterVerdictHandledKey  = '';
   let hunterProgressTotal      = 0;
+  let hunterCurrentListTitle   = '';
+  let hunterLastDirection      = 'auto';
+  let hunterNavigationPending  = false;
+  let hunterNavigationStage    = 'idle'; // idle → folder → find → start
+  let hunterNavigationTarget   = '';
+  let hunterNavigationAttempts = 0;
+  let hunterVisitedLists      = new Set();
+  let hunterVisitedFolders    = new Set();
 
   // Phase 2: human-presence detector
   let hunterHumanActive      = false;
@@ -765,13 +791,18 @@
     const cls = String(el.className || '').toLowerCase();
     const status = [
       el.getAttribute && el.getAttribute('aria-disabled'),
+      el.getAttribute && el.getAttribute('aria-label'),
+      el.getAttribute && el.getAttribute('title'),
       el.getAttribute && el.getAttribute('data-status'),
       el.getAttribute && el.getAttribute('data-state'),
     ].filter(Boolean).join(' ').toLowerCase();
-    return /(^|[\s_-])(completed|complete|finished|done|learnt|correct)([\s_-]|$)/.test(cls + ' ' + status);
+    const progress = navText(el.querySelector && el.querySelector('.percentage-label, [class*="progress"], [class*="status"]')).toLowerCase();
+    const stateText = cls + ' ' + status + ' ' + progress;
+    return /(^|[\s_-])(completed|complete|finished|done|learnt|correct)([\s_-]|$)/.test(stateText) ||
+      /(?:^|\s)100%?(?:\s|$)/.test(stateText);
   }
 
-  function autoNextList() {
+  function legacyAutoNextList() {
     const url = window.location.href.toLowerCase();
 
     if (url.includes('list-starter')) {
@@ -1124,7 +1155,7 @@
   //     loop forever on the same selected item.
   //   - activity-starter uses an explicit fallback chain (back-button by
   //     aria-label, href, ng-click) so the back action always finds SOMETHING.
-  function skipToNextTask() {
+  function legacySkipToNextTask() {
     const url = window.location.href.toLowerCase();
 
     if (url.includes('list-starter')) {
@@ -1220,6 +1251,262 @@
       return;
     }
     showToast('⚠️ Not on a task page');
+  }
+
+  // ── Phase 5: folder → list → Writing mode navigation ─────────────────────
+
+  function navText(el) {
+    return (el && (el.textContent || '').replace(/\s+/g, ' ').trim()) || '';
+  }
+
+  function navRowFor(el) {
+    return el && (el.closest('.crumb-child.item, li.item, .stats-item, [role="button"]') || el.parentElement);
+  }
+
+  function clickNavigationEntry(entry) {
+    if (!entry) return false;
+    // EP attaches the click handler to either the complete row or the title
+    // itself depending on whether the browser is rendered by React or Angular.
+    return safeClick(entry.row) || safeClick(entry.title);
+  }
+
+  function isFolderNavigationRow(el) {
+    const row = navRowFor(el) || el;
+    return !!(row && row.querySelector && (
+      row.querySelector('.folder-icon') ||
+      row.querySelector('[title="folder icon"]') ||
+      row.classList.contains('folder')
+    ));
+  }
+
+  function navigationTitleEntries() {
+    const seen = new Set();
+    return queryAllVisible(NAV_SEL.listTitles)
+      .filter(title => !title.closest('#ep-panel'))
+      .filter(title => !title.closest('li.item .main-text, li.item .sub-text'))
+      .filter(title => !isFolderNavigationRow(title))
+      .map(title => {
+        const label = navText(title);
+        const row = navRowFor(title);
+        return { title, row: row && isVisible(row) ? row : title, label };
+      })
+      .filter(entry => {
+        const key = entry.label.toLowerCase();
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  }
+
+  function getCurrentNavigationListTitle() {
+    const title = queryVisible('#list-title');
+    return navText(title) || hunterCurrentListTitle;
+  }
+
+  /** Return the next live, visible, uncompleted list title; never hard-code a name. */
+  function findNextList() {
+    const entries = navigationTitleEntries();
+    if (entries.length === 0) return null;
+
+    const current = (getCurrentNavigationListTitle() || '').toLowerCase();
+    const currentIndex = current
+      ? entries.findIndex(entry => entry.label.toLowerCase() === current)
+      : -1;
+    const ordered = currentIndex >= 0
+      ? entries.slice(currentIndex + 1).concat(entries.slice(0, currentIndex))
+      : entries;
+
+    return ordered.find(entry => {
+      const key = entry.label.toLowerCase();
+      return !isCompletedTask(entry.row) && !hunterVisitedLists.has(key);
+    }) || null;
+  }
+
+  function preferredHunterDirection() {
+    const configured = String(CFG.hunter.modeDirection || 'auto').toLowerCase();
+    if (configured === 'english-to-french' || configured === 'french-to-english') {
+      hunterLastDirection = configured;
+      return configured;
+    }
+    const prompt = navText(queryVisible(SEL.prompt)).toLowerCase();
+    const placeholder = (queryVisible(SEL.answerInput)?.getAttribute('placeholder') || '').toLowerCase();
+    if (/english\s+to\s+french|write your answer in french/.test(prompt + ' ' + placeholder)) {
+      hunterLastDirection = 'english-to-french';
+    } else if (/french\s+to\s+english|write your answer in english/.test(prompt + ' ' + placeholder)) {
+      hunterLastDirection = 'french-to-english';
+    }
+    return hunterLastDirection === 'auto' ? 'english-to-french' : hunterLastDirection;
+  }
+
+  function modeMatchesDirection(mode, direction) {
+    const text = navText(mode).toLowerCase();
+    if (direction === 'french-to-english') return /french\s+text\s+to\s+english/.test(text);
+    return /english\s+text\s+to\s+french/.test(text);
+  }
+
+  /** Select Writing and preserve the current translation direction when available. */
+  function selectHunterWritingMode() {
+    const modes = queryAllVisible(NAV_SEL.modeItems)
+      .filter(mode => navText(mode.querySelector('.main-text')).toLowerCase() === 'writing');
+    if (modes.length === 0) return false;
+    const direction = preferredHunterDirection();
+    const selected = modes.find(mode => modeMatchesDirection(mode, direction)) || modes[0];
+    if (selected.classList.contains('selected')) return true;
+    return safeClick(selected);
+  }
+
+  /** Reuse the existing EP start controls, including the modern preview header button. */
+  function clickHunterStartButton() {
+    for (const selector of NAV_SEL.startButtons) {
+      const button = queryVisible(selector);
+      if (button && isEnabled(button) && safeClick(button)) {
+        console.log('[Hunter] Started list via:', selector);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function clickHunterBackToFolderView() {
+    const backSelectors = [
+      '#sa-navigation-controls .back-button',
+      '#sa-navigation-controls [data-action="back"]',
+      '.navigation-controls button.back-button',
+      '.navigation-controls .back-button',
+      'button[aria-label="Back"]',
+      'button[aria-label*="back" i]',
+      '.nav-bar-exit',
+      '#exit-button',
+      '.back-button',
+      '[data-action="back"]',
+      'a[href*="browse"]',
+      'a[href*="list-starter"]',
+      '[ng-click*="list-starter"]',
+    ];
+    for (const selector of backSelectors) {
+      const button = queryVisible(selector);
+      if (button && safeClick(button)) return true;
+    }
+
+    // On the hybrid browser, the deepest visible folder breadcrumb is the
+    // reliable way back from a list view to its containing folder.
+    const folders = queryAllVisible(NAV_SEL.folderItems)
+      .filter(row => isFolderNavigationRow(row));
+    const folder = folders[folders.length - 1];
+    if (folder && safeClick(folder)) return true;
+
+    const browseButton = queryVisible('#section-browse-dropdown-button');
+    return !!(browseButton && safeClick(browseButton));
+  }
+
+  /**
+   * Unified navigation driver used by both auto-continue and Skip list.
+   * Returns `moved`, `waiting`, or `exhausted`; it is intentionally DOM-only
+   * and leaves the normal Hunter question state machine in charge after Start.
+   */
+  function navigateToNextList(reason) {
+    if (!hunterEnabled || !CFG.hunter.enabled) return 'waiting';
+
+    const url = window.location.href.toLowerCase();
+    if (url.includes('game') || url.includes('activity-starter')) {
+      // Capture the active Writing direction before leaving the question page;
+      // the starter screen does not necessarily retain the prompt/placeholder.
+      preferredHunterDirection();
+      if (clickHunterBackToFolderView()) {
+        hunterNavigationStage = 'folder';
+        console.log('[Hunter] Navigation: returned to folder/list browser');
+        return 'moved';
+      }
+      return 'waiting';
+    }
+
+    // A return from a completed game lands on the old list's starter screen.
+    // Do not restart it: first leave that screen for the folder/list browser.
+    // A newly clicked list uses the `find` stage and is allowed to select mode.
+    if (hunterNavigationStage === 'folder' && queryAllVisible(NAV_SEL.modeItems).length > 0) {
+      if (clickHunterBackToFolderView()) return 'moved';
+      return 'waiting';
+    }
+
+    // Once a new list is opened, choose Writing before reusing the existing
+    // Start button. This branch also works on legacy and modern hybrid starters.
+    if (hunterNavigationStage !== 'folder' && queryAllVisible(NAV_SEL.modeItems).some(mode =>
+        navText(mode.querySelector('.main-text')).toLowerCase() === 'writing')) {
+      if (!selectHunterWritingMode()) return 'waiting';
+      hunterNavigationStage = 'start';
+      if (clickHunterStartButton()) {
+        hunterNavigationPending = false;
+        hunterNavigationStage = 'idle';
+        hunterNavigationAttempts = 0;
+        return 'moved';
+      }
+      return 'waiting';
+    }
+
+    const next = findNextList();
+    if (next) {
+      const key = next.label.toLowerCase();
+      hunterCurrentListTitle = next.label;
+      hunterNavigationTarget = next.label;
+      hunterVisitedLists.add(key);
+      hunterNavigationStage = 'find';
+      if (clickNavigationEntry(next)) {
+        console.log('[Hunter] Navigation:', reason, 'opened list', next.label);
+        return 'moved';
+      }
+      return 'waiting';
+    }
+
+    // If this view only exposes folders, descend into the first folder not
+    // visited in this run and search its live list titles on the next tick.
+    const folder = queryAllVisible(NAV_SEL.folderItems)
+      .filter(row => isFolderNavigationRow(row))
+      .find(row => {
+        const key = navText(row).toLowerCase();
+        return key && !hunterVisitedFolders.has(key) && !isCompletedTask(row);
+      });
+    if (folder) {
+      const key = navText(folder).toLowerCase();
+      hunterVisitedFolders.add(key);
+      hunterNavigationStage = 'folder';
+      if (safeClick(folder)) {
+        console.log('[Hunter] Navigation: opened folder', navText(folder));
+        return 'moved';
+      }
+      return 'waiting';
+    }
+
+    // A list-starter can contain no list titles because it is showing the
+    // current list's details. Leave it once, then let the browser view expose
+    // the next folder/list titles.
+    if (url.includes('list-starter') && hunterNavigationStage !== 'folder') {
+      hunterNavigationStage = 'folder';
+      if (clickHunterBackToFolderView()) return 'moved';
+      return 'waiting';
+    }
+
+    hunterNavigationPending = false;
+    hunterNavigationStage = 'idle';
+    return 'exhausted';
+  }
+
+  // Kept as a small compatibility wrapper for the existing LIST_DONE call site.
+  function autoNextList() {
+    return navigateToNextList('auto-continue');
+  }
+
+  // ── Skip whole list now shares the exact same folder/list/mode/start driver. ──
+  function skipToNextTask() {
+    if (!hunterEnabled || !CFG.hunter.enabled) {
+      showToast('🕵️ Enable Hunter mode before skipping a list');
+      return;
+    }
+    hunterNavigationPending = true;
+    hunterNavigationStage = 'folder';
+    const result = navigateToNextList('skip');
+    if (result === 'exhausted') showToast('🏁 No more available lists');
+    else if (result === 'moved') showToast('⏭ Finding next available list…');
+    else showToast('⏳ Waiting for the list browser…');
   }
 
   // ── Main Hunter tick (Phase 3 hardened) ──────────────────────────────────
