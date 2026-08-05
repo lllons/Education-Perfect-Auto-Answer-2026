@@ -29,7 +29,7 @@
     activity: "Auto-selects or type the correct answer using AI.",
   };
 
-  // ── Hunter Mode Config (Phase 2 + Phase 3) ─────────────────────────────────
+  // ── Hunter Mode Config (Phase 2 + Phase 3 + Phase 4) ────────────────────────
   // Per-flag notes:
   //   enabled            master toggle; default OFF (user must opt in)
   //   advanceDelay       ms after verdict before clicking Next
@@ -72,6 +72,9 @@
       safeMinDelayMs     : 80,
       safeMaxDelayMs     : 5000,
       watchdogMs         : 120000,
+      // ── Phase 4 additions ──
+      // Progress is discovered from the real #preview-grid/.stats-item DOM;
+      // no hard-coded list length is assumed.
     },
   };
 
@@ -246,7 +249,8 @@
   let hunterListSleepScheduled = false;
   let hunterSyntheticInput     = false;
   let hunterTypingTransitionScheduled = false;
-  let hunterVerdictHandledKey  = '';  let hunterProgressTotal      = 0;
+  let hunterVerdictHandledKey  = '';
+  let hunterProgressTotal      = 0;
 
   // Phase 2: human-presence detector
   let hunterHumanActive      = false;
@@ -522,7 +526,24 @@
    * Returns the cleaned answer or null.
    */
   function scrapeCorrectAnswer() {
-    // 1. Canonical EP field — verified in Implement/* (multiple files).
+    // 1. Prefer an explicit "Correct answer: …" label in the visible modal.
+    //    This is stronger than any styled fragment because it is EP's direct
+    //    answer reveal, not a rendering hint.
+    const dialog = queryVisible('.modeless-answer-dialog');
+    if (dialog) {
+      const explicitNodes = Array.from(dialog.querySelectorAll('*'))
+        .filter(el => /^\s*correct\s*answer\s*:/i.test(el.textContent || ''))
+        // Prefer the smallest matching node, not a parent containing the
+        // entire modal transcript.
+        .sort((a, b) => (a.textContent || '').length - (b.textContent || '').length);
+      for (const el of explicitNodes) {
+        const match = (el.textContent || '').match(/^\s*correct\s*answer\s*:\s*(.+)$/i);
+        const explicit = cleanScrapedAnswer(match ? match[1] : el.textContent);
+        if (explicit) return explicit;
+      }
+    }
+
+    // 2. Canonical EP field — verified in Implement/* (multiple files).
     const canonical = document.getElementById('correct-answer-field');
     // A stale/hidden Angular template can retain the field in the DOM. Never
     // learn from it unless it is the currently displayed feedback value.
@@ -531,7 +552,7 @@
       if (t) return t;
     }
 
-    // 2. Green-span reconstruction from #users-answer-field breakdown.
+    // 3. Green-span reconstruction from #users-answer-field breakdown.
     //    Inside there:
     //      style="color:#0a0"           = part of the correct answer
     //      style="color:#c00"           = user got this part wrong
@@ -556,39 +577,13 @@
         const t = cleanScrapedAnswer(merged);
         if (t) return t;
       }
-      // If EP marks only one portion green, neutral text can still be part of
-      // the answer (for example gray "step" + green "brother"). Exclude only
-      // the explicitly red/wrong fragments and require a visible answer field.
-      const nonRed = spans
-        .filter(span => !isRed(colorOf(span)))
-        .map(s => (s.textContent || '').trim())
-        .filter(Boolean)
-        .join(' ')
-        .trim();
-      const reconstructed = cleanScrapedAnswer(nonRed);
-      if (reconstructed) return reconstructed;
+      // Do not use neutral/grey text as a fallback. The requested learn path
+      // is intentionally conservative: green #0a0 fragments only, with red
+      // and grey fragments ignored rather than guessed.
     }
 
-    // 3. tr.correct inside the open dialog with the longest .native-font.
-    const dialog = queryVisible('.modeless-answer-dialog');
-    if (dialog) {
-      const correct = dialog.querySelector('tr.correct');
-      if (correct) {
-        const fields = correct.querySelectorAll('.native-font, td');
-        const text = lastFieldText(fields);
-        if (text) {
-          const t = cleanScrapedAnswer(text);
-          if (t) return t;
-        }
-      }
-    }
-
-    // 4. .correct-popup / any last-resort visible field.
-    const anyField = queryVisible('#correct-answer-field, .correct-popup .native-font, .correct-answer');
-    if (anyField && (anyField.textContent || '').trim()) {
-      const t = cleanScrapedAnswer(anyField.textContent);
-      if (t) return t;
-    }
+    // No explicit answer and no green fragments means the modal is not safe
+    // to learn from. The caller will still advance using its normal fallback.
     return null;
   }
 
@@ -654,12 +649,11 @@
     const a = stripAlts(correctAnswer);
     if (!q || !a) return null;
 
-    // Don't accidentally erase a previously-good answerMap entry.
-    // (We learned from this mistake; we shouldn't lose the original fuzzy
-    //  matches that worked before.)
-    if (!answerMap[q]) answerMap[q] = a;
+    // Learning is authoritative for this failed question: replace the bad
+    // pair and keep the inverse pair for both translation directions.
+    answerMap[q] = a;
     const aKey = norm(a);
-    if (aKey && aKey !== q && !answerMap[aKey]) answerMap[aKey] = qSrc;
+    if (aKey && aKey !== q) answerMap[aKey] = qSrc;
 
     // Let the re-typing of this question happen cleanly.
     lastFilled = '';
@@ -670,7 +664,14 @@
       if (stored) {
         try { learned = JSON.parse(stored) || {}; } catch (e) { learned = {}; }
       }
+      // Delete before setting so Object.keys() order remains a small
+      // least-recently-written-first ring buffer when a pair is relearned.
+      delete learned[q];
+      if (aKey && aKey !== q) delete learned[aKey];
       learned[q] = a;
+      // Keep the reverse pair too; this preserves the existing bidirectional
+      // vocabulary behavior for either translation direction.
+      if (aKey && aKey !== q) learned[aKey] = qSrc;
       const keys = Object.keys(learned);
       if (keys.length > LEARNED_CAP) {
         const drop = keys.slice(0, keys.length - LEARNED_CAP);
@@ -759,6 +760,17 @@
    *     EP's list-starter reorganisations (verified across files 1, 4, 5, 7).
    *   - Logs every attempt and what was visible at the moment.
    */
+  function isCompletedTask(el) {
+    if (!el) return true;
+    const cls = String(el.className || '').toLowerCase();
+    const status = [
+      el.getAttribute && el.getAttribute('aria-disabled'),
+      el.getAttribute && el.getAttribute('data-status'),
+      el.getAttribute && el.getAttribute('data-state'),
+    ].filter(Boolean).join(' ').toLowerCase();
+    return /(^|[\s_-])(completed|complete|finished|done|learnt|correct)([\s_-]|$)/.test(cls + ' ' + status);
+  }
+
   function autoNextList() {
     const url = window.location.href.toLowerCase();
 
@@ -774,6 +786,8 @@
         '#stats-parent .starter-panel .grouped-options > li.item',
         '#left-controls-panel .grouped-options > li.item',
         '.grouped-options > li.item',
+        '#preview-grid-container .preview-grid .stats-item',
+        '.preview-grid .stats-item',
       ];
       let items = [];
       for (const sel of itemSelectors) {
@@ -787,28 +801,22 @@
 
       let foundCurrent = false;
       for (const item of items) {
-        if (foundCurrent) {
-          if (safeClick(item)) {
-            console.log('[Hunter] autoNext: clicked sidebar item');
-            return true;
-          }
-          continue;
+        const current = item.classList.contains('selected') ||
+          item.classList.contains('active') ||
+          item.classList.contains('current') ||
+          item.getAttribute('aria-selected') === 'true';
+        if (foundCurrent && !current && !isCompletedTask(item) && safeClick(item)) {
+          console.log('[Hunter] autoNext: clicked next available task');
+          return true;
         }
-        if (item.classList.contains('selected') ||
-            item.classList.contains('active')   ||
-            item.classList.contains('current')  ||
-            item.getAttribute('aria-selected') === 'true') {
-          foundCurrent = true;
-        }
+        if (current) foundCurrent = true;
       }
-      // No "next" after the current — open the first not-completed item.
+      // No item follows the current one. Start the first genuinely available
+      // task, never a completed/learnt item and never the current item again.
       for (const item of items) {
-        const cls = item.className || '';
-        if (cls.includes('not-started') || !cls.includes('completed')) {
-          if (safeClick(item)) {
-            console.log('[Hunter] autoNext: opened first non-completed task');
-            return true;
-          }
+        if (!isCompletedTask(item) && safeClick(item)) {
+          console.log('[Hunter] autoNext: opened first available task');
+          return true;
         }
       }
       return false;
@@ -844,6 +852,8 @@
   //     never let Hunter get stuck suspended.
   function onHumanInteraction(e) {
     if (!hunterEnabled || hunterSyntheticInput) return;
+    // Ignore programmatic events; Hunter should yield only to real user input.
+    if (e && e.isTrusted === false) return;
     const target = e && e.target;
     if (!target) return;
     const isAnswerField = target.matches && (
@@ -862,14 +872,16 @@
     if (!hunterHumanSuspended) {
       hunterHumanSuspended = true;
       console.log('[Hunter] Human detected — suspending');
+      showToast('👤 Human typing — Hunter idle');
       setDebug('👤 Human typing — Hunter idle');
     }
     if (hunterHumanTimer) clearTimeout(hunterHumanTimer);
     hunterHumanTimer = setTimeout(() => {
-      if (!hunterEnabled) return;    hunterHumanActive      = false;
-    hunterHumanSuspended   = false;
-    hunterListSleepScheduled = false;
+      if (!hunterEnabled) return;
+      hunterHumanActive = false;
+      hunterHumanSuspended = false;
       console.log('[Hunter] Human idle — resuming');
+      showToast('👤 Human idle — Hunter resumed');
       // Bump watchdog so we don't reset mid-resume.
       hunterStateEntryMs = Date.now();
       updateHunterDebug();
@@ -947,17 +959,20 @@
    *    4. Same fallbacks as clickAdvanceButton() (for the non-error case)
    *  Returns true if anything was clicked.
    */
-  function clickContinueButton() {
-    // 1. The exact EP `#continue-button` (priority 1A: outside modal, 1B: inside).
+  function clickContinueButton() {    // 1. The modal footer is the highest-priority error path. EP reuses the
+    //    same ID in the footer, so scope it first before broader fallbacks.
     const selectors = [
-      '#continue-button:not([disabled])',
+      '.modeless-answer-dialog .modal-footer #continue-button:not([disabled])',
       '.modal-footer #continue-button:not([disabled])',
+      '#continue-button:not([disabled])',
       '.modeless-answer-dialog #continue-button:not([disabled])',
       '.modal-footer button.nice-button:not([disabled])',
-      '#continue-button',
+      '.modeless-answer-dialog .modal-footer #continue-button',
       '.modal-footer #continue-button',
+      '#continue-button',
       '.modeless-answer-dialog #continue-button',
     ];
+
     for (const sel of selectors) {
       const btn = queryVisible(sel);
       if (btn && isEnabled(btn)) {
@@ -1120,6 +1135,8 @@
         '#stats-parent .starter-panel li.item',
         '#stats-parent .starter-panel .grouped-options > li.item',
         '.grouped-options > li.item',
+        '#preview-grid-container .preview-grid .stats-item',
+        '.preview-grid .stats-item',
       ];
       let items = [];
       for (const sel of itemSelectors) {
@@ -1140,33 +1157,35 @@
 
       let foundCurrent = false;
       for (const item of items) {
-        if (foundCurrent) {
+        const current = item.classList.contains('selected') ||
+          item.classList.contains('active') ||
+          item.classList.contains('current') ||
+          item.getAttribute('aria-selected') === 'true';
+        if (foundCurrent && !current && !isCompletedTask(item)) {
           if (safeClick(item)) {
-            showToast('⏭ Skipped to next task');
+            showToast('⏭ Skipped to next available task');
             console.log('[Hunter] Skipped sidebar item');
           } else {
-            showToast('⚠️ Could not click next item');
+            showToast('⚠️ Could not click next available item');
           }
           return;
         }
-        if (item.classList.contains('selected') ||
-            item.classList.contains('active')   ||
-            item.classList.contains('current')  ||
-            item.getAttribute('aria-selected') === 'true') {
-          foundCurrent = true;
-        }
+        if (current) foundCurrent = true;
       }
 
       if (!foundCurrent) {
-        if (safeClick(items[0])) {
-          showToast('⏭ Skipped to first task');
-          console.log('[Hunter] Skipped to first sidebar item');
+        const firstAvailable = items.find(item => !isCompletedTask(item));
+        if (firstAvailable && safeClick(firstAvailable)) {
+          showToast('⏭ Skipped to first available task');
+          console.log('[Hunter] Skipped to first available sidebar item');
+        } else {
+          showToast('🏁 No more available tasks');
         }
         return;
       }
 
       // foundCurrent but no next-after: the list is exhausted.
-      showToast('🏁 No more tasks here — back to course view');
+      showToast('🏁 No more available tasks here — back to course view');
       const crumb = queryVisible('.breadcrumbs .crumb, .crumb-child');
       if (crumb) safeClick(crumb);
       return;
@@ -1244,7 +1263,8 @@
         hunterState !== 'IDLE' &&
         !hunterHumanSuspended) {
       console.warn('[Hunter] Watchdog: stuck in', hunterState, 'for',
-                   Math.floor(stuck/1000), 's — resetting to IDLE');                hunterSetState('IDLE');
+                   Math.floor(stuck/1000), 's — resetting to IDLE');
+      hunterSetState('IDLE');
       lastFilled = '';
       hunterAdvancing = false;
       hunterNoAdvance = 0;
@@ -1256,12 +1276,13 @@
       console.warn('[Hunter] Global watchdog: no activity for',
                    Math.floor((now - hunterLastActiveMs) / 1000), 's');
       hunterLastActiveMs = now;
-      showToast('🛟 Hunter reset (global watchdog)');                hunterSetState('IDLE');
+      showToast('🛟 Hunter reset — returning to idle');
+      hunterSetState('IDLE');
     }
   }
 
   function hunterTick() {
-    if (!hunterEnabled || pageChanging) return;
+    if (!hunterEnabled || !CFG.hunter.enabled || pageChanging) return;
 
     try {
       // URL-change detection (SPA navigation).
