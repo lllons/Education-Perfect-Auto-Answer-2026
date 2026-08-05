@@ -224,18 +224,29 @@
   //   AWAIT_VERDICT : answer submitted, polling EP DOM for correct/incorrect verdict
   //   ADVANCE       : verdict seen, clicking "Next question" / dismissing overlay
   //   LIST_DONE     : end-of-list reached (or no more next-list items)
-  let hunterEnabled          = false;
-  let hunterTimer            = null;
-  let hunterDelayedTimers    = [];   // setTimeout handles inside Hunter — all cleared on stop
-  let hunterState            = 'IDLE';
-  let hunterPrevState        = 'IDLE';
-  let hunterStateEntryMs     = 0;    // wall-clock at last state change (for watchdog)
-  let hunterQuestion         = '';
-  let hunterAdvancing        = false;
-  let hunterScore            = { correct: 0, incorrect: 0 };
-  let hunterStartTime        = 0;
-  let hunterNoAdvance        = 0;
-  let hunterQuestionStart    = 0;
+  let hunterEnabled            = false;
+  let hunterTimer              = null;
+  let hunterDelayedTimers      = [];   // setTimeout handles inside Hunter — all cleared on stop
+  let hunterState              = 'IDLE';
+  let hunterPrevState          = 'IDLE';
+  let hunterStateEntryMs       = 0;    // wall-clock at last state change (for watchdog)
+  let hunterQuestion           = '';
+  let hunterAdvancing          = false;
+  let hunterScore              = { correct: 0, incorrect: 0 };
+  let hunterStartTime          = 0;
+  let hunterNoAdvance           = 0;
+  let hunterQuestionStart      = 0;
+  // Phase 4 timing/progress state. Keep these declarations together so a
+  // partially applied patch can never turn them into strict-mode assignments.
+  let hunterQuestionStartMs    = 0;
+  let hunterQuestionTimes      = [];
+  let hunterEtaTimer           = null;
+  let hunterBadgeEl            = null;
+  let hunterAdvanceReadyAt     = 0;
+  let hunterListSleepScheduled = false;
+  let hunterSyntheticInput     = false;
+  let hunterTypingTransitionScheduled = false;
+  let hunterVerdictHandledKey  = '';  let hunterProgressTotal      = 0;
 
   // Phase 2: human-presence detector
   let hunterHumanActive      = false;
@@ -248,13 +259,6 @@
   // ─── Phase 3: lifecycle / watcher plumbing ───────────────────────────────
   let hunterLastPageUrl      = '';   // detect SPA route changes
   let hunterLastActiveMs     = 0;    // last tick observed activity on the page
-
-  // ─── Phase 4: progress + ETA ─────────────────────────────────
-  // Rolling avg of ms spent per question (excluding the last one so a long
-  // current question doesn't poison the ETA). 80-sample sliding window.
-  let hunterQuestionTimes    = [];   // most recent first
-  let hunterQuestionStartMs  = 0;
-  let hunterEtaTimer         = null;
 
   // ── Page-change / unload guards ───────────────────────────────────────────
   window.addEventListener('beforeunload', () => {
@@ -435,16 +439,20 @@
 
     filling      = true;
     lastTypeTime = Date.now();
+    if (hunterEnabled && hunterState === 'DETECTED') hunterSetState('TYPING');
     setDebug(`Typing: "${word}" → "${answer}"`);
     console.log(`[EP] "${word}" → "${answer}"`);
 
+    hunterSyntheticInput = true;
     try {
       await typeAtCursor(input, answer);
       showToast(`💡 ${answer.length > 48 ? answer.slice(0,48)+'…' : answer}`);
     } catch (e) {
       console.warn('[EP] Typing error:', e);
+    } finally {
+      hunterSyntheticInput = false;
+      filling = false;
     }
-    filling = false;
   }
 
   function startObserver() {
@@ -516,7 +524,9 @@
   function scrapeCorrectAnswer() {
     // 1. Canonical EP field — verified in Implement/* (multiple files).
     const canonical = document.getElementById('correct-answer-field');
-    if (canonical && (canonical.textContent || '').trim()) {
+    // A stale/hidden Angular template can retain the field in the DOM. Never
+    // learn from it unless it is the currently displayed feedback value.
+    if (canonical && isVisible(canonical) && (canonical.textContent || '').trim()) {
       const t = cleanScrapedAnswer(canonical.textContent);
       if (t) return t;
     }
@@ -530,23 +540,33 @@
     //    parts the system knew were correct, regardless of what the user
     //    typed.
     const usersField = document.getElementById('users-answer-field');
-    if (usersField) {
-      const greenPieces = usersField.querySelectorAll('span[style*="color:#0a0"], span[style*="color: rgb(0, 170, 0)"], span[style*="rgb(0,170,0)"], span[style*="color:green"], span[class*="green"]');
+    if (usersField && isVisible(usersField)) {
+      const spans = Array.from(usersField.querySelectorAll('span'));
+      const colorOf = span => {
+        const style = (span.getAttribute('style') || '').toLowerCase().replace(/\s+/g, '');
+        let color = style.match(/color:([^;]+)/)?.[1] || '';
+        if (!color && typeof getComputedStyle === 'function') color = getComputedStyle(span).color || '';
+        return color.toLowerCase().replace(/\s+/g, '');
+      };
+      const isRed = color => /#c00|#cc0000|rgb\(204,0,0\)|rgb\(255,0,0\)|red/.test(color);
+      const isGreen = color => /#0a0|#00aa00|rgb\(0,170,0\)|rgb\(0,128,0\)|green/.test(color);
+      const greenPieces = spans.filter(span => isGreen(colorOf(span)));
       if (greenPieces.length > 0) {
-        const merged = Array.from(greenPieces)
-          .map(s => (s.textContent || '').trim())
-          .filter(Boolean)
-          .join(' ')
-          .trim();
-        if (merged) {
-          const t = cleanScrapedAnswer(merged);
-          if (t) return t;
-        }
+        const merged = greenPieces.map(s => (s.textContent || '').trim()).filter(Boolean).join(' ').trim();
+        const t = cleanScrapedAnswer(merged);
+        if (t) return t;
       }
-      // Fallback to the whole breakdown text — it'll often contain the
-      // correct word(s) separated by EP's highlight formatting.
-      const full = cleanScrapedAnswer(usersField.textContent);
-      if (full) return full;
+      // If EP marks only one portion green, neutral text can still be part of
+      // the answer (for example gray "step" + green "brother"). Exclude only
+      // the explicitly red/wrong fragments and require a visible answer field.
+      const nonRed = spans
+        .filter(span => !isRed(colorOf(span)))
+        .map(s => (s.textContent || '').trim())
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+      const reconstructed = cleanScrapedAnswer(nonRed);
+      if (reconstructed) return reconstructed;
     }
 
     // 3. tr.correct inside the open dialog with the longest .native-font.
@@ -661,7 +681,8 @@
     } catch (e) {
       console.warn('[Hunter] Failed to persist learned pair:', e);
     }
-    hunterQuestionsAnswered++;
+    // The verdict handler owns the question counter. Learning corrects the
+    // current question; it must not count as a second question.
     setDebug(`🧠 Learned "${qSrc}" → "${a}"`);
     return a;
   }
@@ -822,7 +843,7 @@
   //   - Idle callback bumps the watchdog so consecutive user interactions
   //     never let Hunter get stuck suspended.
   function onHumanInteraction(e) {
-    if (!hunterEnabled) return;
+    if (!hunterEnabled || hunterSyntheticInput) return;
     const target = e && e.target;
     if (!target) return;
     const isAnswerField = target.matches && (
@@ -845,9 +866,9 @@
     }
     if (hunterHumanTimer) clearTimeout(hunterHumanTimer);
     hunterHumanTimer = setTimeout(() => {
-      if (!hunterEnabled) return;
-      hunterHumanActive    = false;
-      hunterHumanSuspended = false;
+      if (!hunterEnabled) return;    hunterHumanActive      = false;
+    hunterHumanSuspended   = false;
+    hunterListSleepScheduled = false;
       console.log('[Hunter] Human idle — resuming');
       // Bump watchdog so we don't reset mid-resume.
       hunterStateEntryMs = Date.now();
@@ -1212,6 +1233,7 @@
     hunterPrevState    = hunterState;
     hunterState        = next;
     hunterStateEntryMs = Date.now();
+    if (next !== 'TYPING') hunterTypingTransitionScheduled = false;
   }
 
   function hunterWatchdog() {
@@ -1222,8 +1244,7 @@
         hunterState !== 'IDLE' &&
         !hunterHumanSuspended) {
       console.warn('[Hunter] Watchdog: stuck in', hunterState, 'for',
-                   Math.floor(stuck/1000), 's — resetting to IDLE');
-      hunterSetState('IDLE');
+                   Math.floor(stuck/1000), 's — resetting to IDLE');                hunterSetState('IDLE');
       lastFilled = '';
       hunterAdvancing = false;
       hunterNoAdvance = 0;
@@ -1235,8 +1256,7 @@
       console.warn('[Hunter] Global watchdog: no activity for',
                    Math.floor((now - hunterLastActiveMs) / 1000), 's');
       hunterLastActiveMs = now;
-      showToast('🛟 Hunter reset (global watchdog)');
-      hunterSetState('IDLE');
+      showToast('🛟 Hunter reset (global watchdog)');                hunterSetState('IDLE');
     }
   }
 
@@ -1283,6 +1303,7 @@
         if (word) {
           hunterQuestion       = word;
           hunterQuestionStart  = Date.now();
+          hunterQuestionStartMs = Date.now();
           hunterSetState('DETECTED');
           hunterNoAdvance      = 0;
           console.log('[Hunter] DETECTED:', word);
@@ -1292,8 +1313,10 @@
       }
 
       case 'DETECTED': {
-        // Question visible, wait for tryFill() pipeline to start typing.
-        if (filling) {
+        // Question visible, wait for tryFill() pipeline to start typing. The
+        // direct transition in tryFill() covers zero-delay answers that finish
+        // between two 500 ms Hunter ticks; this fallback covers slower input.
+        if (filling || (hunterQuestion && lastFilled.startsWith(hunterQuestion + '→'))) {
           hunterSetState('TYPING');
           console.log('[Hunter] TYPING');
           setDebug('⌨️ Typing answer…');
@@ -1303,11 +1326,12 @@
 
       case 'TYPING': {
         // Pipeline finished; transition to verdict polling after EP has
-        // had a moment to submit + grade. Phase 3: deferred callback is
-        // tracked in hunterDelayedTimers (clamped duration) so we can
-        // cleanly cancel it on STOP / page-change.
-        if (!filling) {
+        // had a moment to submit + grade. Only arm this once: the 500 ms
+        // tick must not queue a second transition for the same answer.
+        if (!filling && !hunterTypingTransitionScheduled) {
+          hunterTypingTransitionScheduled = true;
           hunterDefer(() => {
+            hunterTypingTransitionScheduled = false;
             if (hunterState === 'TYPING') hunterSetState('AWAIT_VERDICT');
           }, Math.max(120, CFG.typeCooldown * 1000));
         }
@@ -1317,6 +1341,13 @@
       case 'AWAIT_VERDICT': {
         const verdict = detectVerdict();
         if (!verdict) break; // still waiting
+
+        // EP can leave the feedback DOM mounted for more than one tick. The
+        // state transition normally protects us, while this key also guards
+        // against a synchronous re-entry from MutationObserver callbacks.
+        const verdictKey = `${hunterQuestion}|${lastFilled}|${verdict}`;
+        if (verdictKey === hunterVerdictHandledKey) break;
+        hunterVerdictHandledKey = verdictKey;
 
         if (verdict === 'incorrect') {
           hunterScore.incorrect++;
@@ -1331,14 +1362,22 @@
             catch (e) { console.warn('[Hunter] learnFromError threw', e); }
           }
 
-          // Phase 4 priority order:
-          //   1. Click `#continue-button` ("Next question") — the most
-          //      reliable path on every error modal layout we tested.
-          //   2. Fall back to broader dismissal only if that fails.
+          // The exact EP #continue-button is the primary learn-and-advance
+          // path. Move to ADVANCE immediately and arm hunterAdvancing so the
+          // next tick cannot click the same overlay twice.
           const continued = clickContinueButton();
           if (!continued) dismissWrongAnswer();
+          hunterAdvancing    = continued;
+          hunterAdvanceReadyAt = Date.now() + clampMs(CFG.hunter.advanceDelay, CFG.hunter.safeMinDelayMs, CFG.hunter.safeMaxDelayMs);
+          hunterSetState('ADVANCE');
           hunterDefer(() => {
-            if (hunterState === 'AWAIT_VERDICT') hunterSetState('ADVANCE');
+            if (hunterState === 'ADVANCE') {
+              hunterAdvancing = false;
+              hunterSetState('IDLE');
+              hunterQuestion = '';
+              lastFilled = '';
+              updateHunterDebug();
+            }
           }, CFG.hunter.advanceDelay);
           if (learned) {
             showToast('🧠 Learned “' + learned.slice(0, 22) + '” · Next...');
@@ -1352,6 +1391,7 @@
           recordQuestionDuration();
           console.log('[Hunter] Verdict: CORRECT');
           setDebug('✅ Correct — advancing');
+          hunterAdvanceReadyAt = Date.now() + clampMs(CFG.hunter.advanceDelay, CFG.hunter.safeMinDelayMs, CFG.hunter.safeMaxDelayMs);
           hunterSetState('ADVANCE');
           updateHunterDebug();
         } else if (verdict === 'unknown') {
@@ -1363,7 +1403,7 @@
       }
 
       case 'ADVANCE': {
-        if (hunterAdvancing) break;
+        if (hunterAdvancing || Date.now() < hunterAdvanceReadyAt) break;
         hunterAdvancing = true;
         console.log('[Hunter] ADVANCE: clicking Next…');
 
@@ -1429,24 +1469,37 @@
 
       case 'LIST_DONE': {
         console.log('[Hunter] List / task complete.');
-        showToast('🏁 List complete');
 
         if (CFG.hunter.autoContinueLists) {
+          // LIST_DONE is polled every 500 ms. Guard both the toast and the
+          // sleep so repeated ticks cannot spam the user or queue navigation.
+          if (hunterListSleepScheduled) return;
+          showToast('🏁 List complete');
+          hunterListSleepScheduled = true;
+          const sleepMs = clampMs(CFG.hunter.betweenListDelay,
+                                  CFG.hunter.safeMinDelayMs,
+                                  CFG.hunter.safeMaxDelayMs);
+          const sleepSeconds = (sleepMs / 1000).toFixed(sleepMs % 1000 ? 1 : 0);
+          showToast('💤 Sleeping ' + sleepSeconds + 's before next list…');
           hunterDefer(() => {
             if (!hunterEnabled) return;
             const moved = autoNextList();
             if (moved) {
               hunterDefer(() => {
+            
                 hunterSetState('IDLE');
                 hunterQuestion  = '';
                 hunterAdvancing = false;
+                hunterListSleepScheduled = false;
+                lastFilled      = '';
                 updateHunterDebug();
               }, 800);
             } else {
+          
               showToast('🏁 No more lists — Hunter stopped');
               stopHunter();
             }
-          }, CFG.hunter.betweenListDelay);
+          }, sleepMs);
           return;
         }
         showToast('🏁 List complete — Hunter stopped');
