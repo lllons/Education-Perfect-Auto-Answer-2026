@@ -284,7 +284,16 @@
   let hunterHumanTimer       = null;
 
   // Phase 2: learn-from-error + cap
-  let hunterQuestionsAnswered = 0;
+  let    hunterQuestionsAnswered = 0;
+    CFG.hunter.enabled       = true;
+    hunterNavigationPending  = false;
+    hunterNavigationStage    = 'idle';
+    hunterNavigationTarget   = '';
+    hunterNavigationAttempts = 0;
+    hunterVisitedLists       = new Set();
+    hunterVisitedFolders     = new Set();
+    hunterCurrentListTitle   = '';
+    hunterLastDirection      = 'auto';
 
   // ─── Phase 3: lifecycle / watcher plumbing ───────────────────────────────
   let hunterLastPageUrl      = '';   // detect SPA route changes
@@ -1406,6 +1415,11 @@
    */
   function navigateToNextList(reason) {
     if (!hunterEnabled || !CFG.hunter.enabled) return 'waiting';
+
+    // Keep driving the DOM across SPA renders until the selected list has
+    // reached Writing mode and a real EP Start button has been clicked.
+    // Intermediate calls may only return to the browser or open a folder.
+    hunterNavigationPending = true;
 
     const url = window.location.href.toLowerCase();
     if (url.includes('game') || url.includes('activity-starter')) {
