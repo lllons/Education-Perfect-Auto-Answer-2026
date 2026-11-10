@@ -30,34 +30,6 @@ A fast userscript for automatically filling answers on Education Perfect using l
 #### You can switch between the `main` and `full` branches depending on whether you prefer stability or AI 
 ---
 
-## Features
-
-- Auto-types answers directly at the current cursor position
-- Fuzzy matching
-- Automatically extracts pairs from EP pages
-- Real-time question detection
-- Supports standard inputs and contenteditable fields
-- Angular-safe event dispatching
-- Draggable floating control panel
-- Pause / resume controls
-- Toast notifications
-- Optimized for speed and low overhead
-
----
-
-# Preview
-
-```txt
-EP Assistant
-128 pairs loaded
-
-[ Load ] [ Pause ]
-
-Typing: "bonjour" → "hello"
-````
-
----
-
 # Installation
 
 ## 1. Install Tampermonkey
@@ -105,6 +77,21 @@ Load
 ```
 
 The assistant will begin automatically filling answers.
+
+---
+
+## Features
+
+- Auto-types answers directly at the current cursor position
+- Fuzzy matching
+- Automatically extracts pairs from EP pages
+- Real-time question detection
+- Supports standard inputs and contenteditable fields
+- Angular-safe event dispatching
+- Draggable floating control panel
+- Pause / resume controls
+- Toast notifications
+- Optimized for speed and low overhead
 
 ---
 
