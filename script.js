@@ -36,7 +36,10 @@
   //   betweenListDelay   ms pause between finishing one list and starting the next
   //   errorPolicy        'dismiss' | 'learn' | 'hybrid' (default; auto-fallback)
   //   autoStart          auto-click #start-button-main / #start-button-school on idle
-  //   autoContinueLists  when a list finishes, hunt straight into the next list
+  //   autoContinueLists  when a list finishes, hunt straight into the next
+  //                         undone list (default ON; scouted lists first, else
+  //                         the sibling-list walk). Only counts once questions
+  //                         of the current list were actually seen.
   //   maxQuestionsPerRun soft cap on questions before auto-stopping Hunter (0 = ∞)
   //   humanPresenceWindow  ms of real-user activity that pauses Hunter before
   //                         resuming automatically
@@ -66,7 +69,7 @@
       betweenListDelay   : 1500,
       errorPolicy        : 'hybrid',
       autoStart          : true,
-      autoContinueLists  : false,
+      autoContinueLists  : true,
       // 'auto' preserves the current Writing direction; explicit values are
       // 'english-to-french' or 'french-to-english'.
       modeDirection      : 'auto',
@@ -289,6 +292,7 @@
   let hunterBadgeEl            = null;
   let hunterAdvanceReadyAt     = 0;
   let hunterListSleepScheduled = false;
+  let hunterListPlayed         = false;   // a question of the current list was seen
   let hunterSyntheticInput     = false;
   let hunterTypingTransitionScheduled = false;
   let hunterVerdictHandledKey  = '';
@@ -323,6 +327,7 @@
     hunterCurrentListTitle   = '';
     hunterLastDirection      = 'auto';
     hunterListSleepScheduled = false;
+    hunterListPlayed         = false;
   }
 
   // ─── Phase 3: lifecycle / watcher plumbing ───────────────────────────────
@@ -1550,6 +1555,7 @@
     hunterNavigationStage    = 'folder';
     hunterNavigationAttempts = 0;
     hunterNavigationReadyAt  = 0;
+    hunterListPlayed         = false;
   }
 
   /** One navigation step per tick. After each click wait for EP to re-render
@@ -1601,7 +1607,11 @@
   let scoutRunning = false;
   let scoutCancel  = false;
   let scoutSteps   = 0;
-  let scoutCurrent = null;   // { lang, path[], title } of the list Scout launched
+  let scoutCurrent = null;   // { lang, path[], title, played } of the list being hunted
+  // Finish-detection trackers for the current scouted list (see detectScoutFinished).
+  let scoutNoQuestionSince = 0, scoutStarterTicks = 0, scoutGameIds = '', scoutFinishRule = '';
+  let scoutAdoptKey = '', scoutLastRowTitle = '';
+  const FINISHLOG_KEY = 'ep.finishlog';   // evidence snapshots of finish screens
 
   function scoutLoad() {
     try {
@@ -1634,6 +1644,9 @@
 
   /** Remember the launched list (also across a page reload) or clear it. */
   function scoutSetCurrent(t) {
+    if (!scoutCurrent || !t || scoutCurrent.title !== t.title) {
+      scoutNoQuestionSince = 0; scoutStarterTicks = 0; scoutGameIds = '';
+    }
     scoutCurrent = t;
     try {
       if (t) localStorage.setItem(SCOUT_CURRENT_KEY, JSON.stringify(t));
@@ -1816,10 +1829,110 @@
     if (!hunterEnabled) startHunter();
   }
 
+  /** Hunter is on and the user started a list by hand: if it was scouted, track
+   *  it as the current list so finish → next undone list works for it too.
+   *  Matched by list title (`#list-title`) + the folder id in the URL; without a
+   *  title only a folder holding exactly one vocab list is trusted. */
+  function scoutAdoptCurrent() {
+    const m = window.location.pathname.match(/^\/app\/([^/]+)\/(\d+)\/(\d+)\/(list-starter|game)/i);
+    if (!m) return;
+    // The game page shows no list title; fall back to the last list row opened
+    // in the content browser (trusted only together with the URL's folder id).
+    const shown = navText(queryVisible('#list-title'));
+    const title = shown || scoutLastRowTitle;
+    const key = m[0] + '|' + title;
+    if (key === scoutAdoptKey) return;
+    scoutAdoptKey = key;
+    const store = scoutLoad()[decodeURIComponent(m[1]).toLowerCase()];
+    if (!store) return;
+    // The URL's folder id is not always the id Scout stored (nested folders), so
+    // match by title and use the folder id only to narrow duplicates.
+    const vocab = Object.values(store.lists || {}).filter(scoutIsVocab);
+    const sameTitle = title ? vocab.filter(l => l.title.toLowerCase() === title.toLowerCase()) : [];
+    const inFolder = (title ? sameTitle : vocab).filter(l => String(l.folderId) === m[2]);
+    const pool = (inFolder.length || !shown) ? inFolder : sameTitle;
+    const undone = pool.filter(l => !l.done);
+    // A folder shared under several parents is scanned once per parent: same
+    // title + folder id = the same list.
+    const oneList = pool.length > 0 && pool.every(l => l.title === pool[0].title && l.folderId === pool[0].folderId);
+    const pick = oneList ? (undone[0] || pool[0]) : (title && undone.length === 1 ? undone[0] : null);
+    if (!pick) return;
+    scoutSetCurrent({ lang: decodeURIComponent(m[1]).toLowerCase(), path: pick.folderPath, title: pick.title, played: false });
+    showToast('🔭 Tracking “' + pick.title.slice(0, 30) + '”');
+  }
+
+  /** Remember the last list row opened in the content browser (see above). */
+  function scoutTrackRowClicks() {
+    document.addEventListener('click', e => {
+      const row = e.target && e.target.closest && e.target.closest('.crumb-child.item');
+      if (row && !isFolderNavigationRow(row)) {
+        scoutLastRowTitle = navText(row.querySelector('.item-title')) || scoutLastRowTitle;
+      }
+    }, true);
+  }
+
+  /** Finished-list detection for the tracked list. Only called once its questions
+   *  were seen (`played`). Rules: (a) on the game page, no question and no answer
+   *  box for >4 s; (b) EP returned to the same list's list-starter for 2 ticks.
+   *  The dashboard (Exit button) is never "finished". Sets `scoutFinishRule`. */
+  function detectScoutFinished() {
+    const path = window.location.pathname;
+    const g = path.match(/^\/app\/[^/]+\/(\d+)\/(\d+)\/(game|list-starter)/i);
+    if (/\/learning\/dashboard/i.test(path) || !g) {
+      scoutNoQuestionSince = 0; scoutStarterTicks = 0;
+      return false;
+    }
+    const ids = g[1] + '/' + g[2];
+    if (g[3].toLowerCase() === 'game') {
+      scoutGameIds = ids;
+      scoutStarterTicks = 0;
+      const q = document.getElementById('question-text');
+      if ((q && isVisible(q) && navText(q)) || queryVisible('input#answer-text')) {
+        scoutNoQuestionSince = 0;
+        return false;
+      }
+      if (!scoutNoQuestionSince) scoutNoQuestionSince = Date.now();
+      if (Date.now() - scoutNoQuestionSince <= 4000) return false;
+      scoutFinishRule = 'game: no question or answer box for 4s';
+      return true;
+    }
+    scoutNoQuestionSince = 0;
+    if (ids !== scoutGameIds) { scoutStarterTicks = 0; return false; }
+    if (++scoutStarterTicks < 2) return false;
+    scoutFinishRule = 'returned to list-starter of the played list';
+    return true;
+  }
+
+  /** Keep the last 5 finish-screen snapshots so the real screen can be read later. */
+  function scoutLogFinish(rule) {
+    try {
+      const log = JSON.parse(localStorage.getItem(FINISHLOG_KEY) || '[]');
+      const dialog = queryVisible('.modeless-answer-dialog, .modal, [role="dialog"]');
+      log.push({
+        at: new Date().toISOString(),
+        path: window.location.pathname,
+        rule,
+        buttons: queryAllVisible('button').filter(b => !b.closest('#ep-panel'))
+                   .map(b => navText(b).slice(0, 30)).filter(Boolean).slice(0, 12),
+        dialog: dialog ? navText(dialog).slice(0, 200) : '',
+        startLabel: navText(document.getElementById('start-button-main-label')).slice(0, 40),
+        bar: ((document.querySelector('.game-action-bar') || {}).className || '').slice(0, 120),
+      });
+      localStorage.setItem(FINISHLOG_KEY, JSON.stringify(log.slice(-5)));
+    } catch (e) {}
+  }
+
   function scoutMarkDone(t) {
     const all = scoutLoad();
-    const e = all[t.lang] && all[t.lang].lists[t.path.concat(t.title).join(' › ')];
-    if (e) { e.done = true; e.progress = 100; scoutSave(all); }
+    const lists = all[t.lang] && all[t.lang].lists;
+    const e = lists && lists[t.path.concat(t.title).join(' › ')];
+    if (e) {
+      // Same list scanned under another parent folder: mark those done too.
+      Object.values(lists).forEach(l => {
+        if (l.title === e.title && l.folderId === e.folderId) { l.done = true; l.progress = 100; }
+      });
+      scoutSave(all);
+    }
     renderScoutList();
   }
 
@@ -1959,8 +2072,17 @@
         return;
       }
 
-    // LIST_DONE short-circuit: detected at top, even mid-state.
-    if (detectListDone() &&
+      // A list the user started by hand: track it if it was scouted.
+      if (!scoutCurrent) scoutAdoptCurrent();
+
+    // LIST_DONE short-circuit: detected at top, even mid-state. A tracked list
+    // uses the played-list rules; otherwise the generic detector, which only
+    // counts once a question was seen (an unplayed list's starter screen also
+    // reads Continue/Restart).
+    const finishedNow = scoutCurrent
+      ? scoutCurrent.played && (detectScoutFinished() || (url.includes('game') && detectListDone()))
+      : hunterListPlayed && detectListDone();
+    if (finishedNow &&
         hunterState !== 'LIST_DONE' &&
         hunterState !== 'ADVANCE') {
       console.log('[Hunter] Detected list-complete state');
@@ -1976,6 +2098,7 @@
           hunterQuestion       = word;
           hunterQuestionStart  = Date.now();
           hunterQuestionStartMs = Date.now();
+          hunterListPlayed     = true;
           if (scoutCurrent && !scoutCurrent.played) {
             scoutCurrent.played = true;
             scoutSetCurrent(scoutCurrent);
@@ -2155,6 +2278,8 @@
           if (hunterListSleepScheduled) return;
           hunterListSleepScheduled = true;
           const finished = scoutCurrent;
+          scoutLogFinish(scoutFinishRule || 'detectListDone');
+          scoutFinishRule = '';
           scoutMarkDone(finished);
           const sleepMs = clampMs(CFG.hunter.betweenListDelay,
                                   CFG.hunter.safeMinDelayMs,
@@ -2200,7 +2325,10 @@
     if (CFG.hunter.autoStart && hunterState === 'IDLE') {
       // Only start once the vocab is loaded; Start before that opens a game
       // the assistant has no answers for.
-      if (url.includes('list-starter') && vocabUnlocked && Object.keys(answerMap).length > 0) {
+      // A played, tracked list that returned to its starter is waiting for the
+      // finish check; restarting it here would undo it.
+      if (url.includes('list-starter') && vocabUnlocked && Object.keys(answerMap).length > 0 &&
+          !(scoutCurrent && scoutCurrent.played)) {
         const startMain = queryVisible('#start-button-main');
         if (startMain) safeClick(startMain);
       } else if (url.includes('activity-starter')) {
@@ -2665,6 +2793,7 @@
     startObserver();
     startPolling();
     updatePanelVisibility();
+    scoutTrackRowClicks();
     scoutResumePending();
     scoutRestoreCurrent();
 

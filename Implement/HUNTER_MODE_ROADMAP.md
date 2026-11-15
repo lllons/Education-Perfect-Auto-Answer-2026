@@ -465,6 +465,8 @@ Status legend: ✅ shipped on `main` · 🟡 Planned — not in current release
 | Scout Mode: vocabulary-only filter (icon `<title>` `Translation list` vs `Smart lesson`) | **Done — verified live** (Chinese 32 → 8) | ✅ yes |
 | Scout Mode: `scoutCurrent` persisted in `ep.scout.current`, restored after a reload, cleared by STOP | **Done — verified live** | ✅ yes |
 | Scout Mode: auto-continue to the next undone scouted list after LIST_DONE (false "done" on the starter screen fixed with a `played` guard) | **Written — not verified live** (needs a real finished list; see `notes.md` handoff) | ✅ yes |
+| Auto-continue on by default; hand-started lists adopted from `ep.scout` (`scoutAdoptCurrent`) | **Done — verified live** (French list opened from the content browser, Hunter ON → `ep.scout.current` set) | ✅ yes |
+| Finished-list detection `detectScoutFinished()` (no question/answer box for 4 s on the game page, or back on the same list-starter for 2 ticks) + `ep.finishlog` evidence snapshots | **Code + Node unit tests only** — not seen against a real finished list; read `ep.finishlog` after the user finishes one | ✅ yes |
 | Hunter idle auto-start on list-starter waits for loaded vocab | **Done — verified live** | ✅ yes |
 | Multi-step list navigation driven per tick (`driveHunterNavigation`, settle delay + attempt cap); fixes auto-continue treating `'exhausted'`/`'waiting'` as success | **Done in code — not yet verified live** | ✅ yes |
 
