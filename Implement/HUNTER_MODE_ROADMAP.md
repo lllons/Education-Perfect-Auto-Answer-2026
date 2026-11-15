@@ -457,8 +457,10 @@ Status legend: ✅ shipped on `main` · 🟡 Planned — not in current release
 | Stop button as one-shot kill-switch | **Done** (Phase 3) | ✅ yes — `#ep-stop` |
 | Smoother list navigation (dual selector chain + already-completed guard) | **Done** (Phase 3) | ✅ yes — `autoNextList` / `skipToNextTask` |
 | Smoother back-button chain on activity-starter / game pages | **Done** (Phase 3) | ✅ yes |
-| Progress badge + ETA (live rolling-avg format `⚡ N answered · ~Xs/q`) | **Partial** — `recordQuestionDuration` + `updateProgressBadge` + `fmtDuration` helpers added; UI element wiring pending (tool-cache issue prevented completing the `<div id="ep-badge">` insert in this turn). | 🟡 partial |
-| Between-list sleep toast (`💤 Sleeping Xs before next list…`) | **Partial** — `autoContinueLists` already awaits `betweenListDelay`; informational toast pending | 🟡 partial |
+| Progress badge + ETA (live rolling-avg format `⚡ N answered · ~Xs/q`) | **Done** — `#ep-badge` is in the panel, hidden while Hunter is off, ticked at 1 Hz; verified live (`⚡ ready · measuring pace…`) | ✅ yes |
+| Between-list sleep toast (`🏁 List complete · 💤 next list in Xs…`) | **Done** — shown once per list-complete transition | ✅ yes |
+| STOP uses the full `stopHunter(true)` teardown (timers, listeners, nav state, ETA ticker) | **Done** | ✅ yes |
+| Multi-step list navigation driven per tick (`driveHunterNavigation`, settle delay + attempt cap); fixes auto-continue treating `'exhausted'`/`'waiting'` as success | **Done in code — not yet verified live** | ✅ yes |
 
 ### Phase 5+ (planned, NOT shipped)
 

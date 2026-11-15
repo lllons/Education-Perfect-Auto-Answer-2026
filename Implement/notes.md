@@ -39,6 +39,13 @@ Hidden Angular/SingleFile nodes often remain in the DOM. Always filter candidate
 - Do not add network/API bypasses or assume a selector exists outside the snapshots.
 - Keep future adaptive thresholds, adaptive typing speed, confidence scoring, telemetry/export, and daily progress persistence out of the shipped scope unless explicitly requested.
 
+## Live-test finding (2026-11-16)
+
+- Typing and verdict polling work against the live game page, and EP advances on its own after a real, user-made Submit.
+- EP ends the game and returns to `/learning/dashboard` when `#submit-button` receives a script-generated click (`isTrusted === false`). Hunter must not click or dispatch Submit/Enter for the user; the user submits each answer themselves.
+- `#answer-text` exists twice (empty `<span>`, then the real `<input>`); use `input#answer-text` for the live value.
+- Page click-throughs that exit the game (e.g. `.nav-bar-exit`) are never a valid "advance" action.
+
 ## Phase 4 continuation checklist
 
 - Keep the progress badge hidden while Hunter is off and update it from a bounded rolling duration sample.

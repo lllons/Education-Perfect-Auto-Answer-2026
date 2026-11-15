@@ -72,6 +72,10 @@
       modeDirection      : 'auto',
       maxQuestionsPerRun : 0,
       humanPresenceWindow: 1500,
+      // ms to wait after each navigation click, and how many navigation steps
+      // to try before giving up.
+      navigationSettleMs : 1200,
+      maxNavigationAttempts: 120,
       // ── Phase 3 additions ──
       maxAdvanceAttempts : 5,
       stuckStateMs       : 30000,
@@ -275,7 +279,8 @@
   let hunterNavigationStage    = 'idle'; // idle → folder → find → start
   let hunterNavigationTarget   = '';
   let hunterNavigationAttempts = 0;
-  let hunterVisitedLists      = new Set();
+  let hunterNavigationReadyAt  = 0;
+  let hunterVisitedLists     = new Set();
   let hunterVisitedFolders    = new Set();
 
   // Phase 2: human-presence detector
@@ -285,7 +290,10 @@
 
   // Phase 2: learn-from-error + cap
   let    hunterQuestionsAnswered = 0;
-    CFG.hunter.enabled       = true;
+  CFG.hunter.enabled = true;
+
+  /** Clear list-navigation state. Called on every Hunter start / stop / STOP. */
+  function resetHunterNavigation() {
     hunterNavigationPending  = false;
     hunterNavigationStage    = 'idle';
     hunterNavigationTarget   = '';
@@ -294,6 +302,8 @@
     hunterVisitedFolders     = new Set();
     hunterCurrentListTitle   = '';
     hunterLastDirection      = 'auto';
+    hunterListSleepScheduled = false;
+  }
 
   // ─── Phase 3: lifecycle / watcher plumbing ───────────────────────────────
   let hunterLastPageUrl      = '';   // detect SPA route changes
@@ -1504,23 +1514,52 @@
     return 'exhausted';
   }
 
-  // Kept as a small compatibility wrapper for the existing LIST_DONE call site.
-  function autoNextList() {
-    return navigateToNextList('auto-continue');
+  /** Arm multi-step navigation; hunterTick → driveHunterNavigation() runs it. */
+  function beginHunterNavigation() {
+    const current = getCurrentNavigationListTitle();
+    if (current) hunterVisitedLists.add(current.toLowerCase());
+    hunterNavigationPending  = true;
+    hunterNavigationStage    = 'folder';
+    hunterNavigationAttempts = 0;
+    hunterNavigationReadyAt  = 0;
   }
 
-  // ── Skip whole list now shares the exact same folder/list/mode/start driver. ──
+  /** One navigation step per tick. After each click wait for EP to re-render
+   *  so the same screen is never acted on twice. */
+  function driveHunterNavigation() {
+    hunterStateEntryMs = Date.now(); // navigation is progress, not a stuck state
+    if (Date.now() < hunterNavigationReadyAt) return;
+    if (++hunterNavigationAttempts > CFG.hunter.maxNavigationAttempts) {
+      showToast('🛑 Navigation timed out — Hunter stopped');
+      stopHunter();
+      return;
+    }
+    const result = navigateToNextList('drive');
+    if (result === 'exhausted') {
+      showToast('🏁 No more lists — Hunter stopped');
+      stopHunter();
+    } else if (result === 'moved') {
+      hunterNavigationReadyAt = Date.now() + CFG.hunter.navigationSettleMs;
+      if (!hunterNavigationPending) {
+        // The new list's Start button was clicked; resume normal hunting.
+        hunterListSleepScheduled = false;
+        hunterQuestion  = '';
+        lastFilled      = '';
+        hunterAdvancing = false;
+        hunterSetState('IDLE');
+        updateHunterDebug();
+      }
+    }
+  }
+
+  // ── Skip whole list shares the exact same folder/list/mode/start driver. ──
   function skipToNextTask() {
     if (!hunterEnabled || !CFG.hunter.enabled) {
       showToast('🕵️ Enable Hunter mode before skipping a list');
       return;
     }
-    hunterNavigationPending = true;
-    hunterNavigationStage = 'folder';
-    const result = navigateToNextList('skip');
-    if (result === 'exhausted') showToast('🏁 No more available lists');
-    else if (result === 'moved') showToast('⏭ Finding next available list…');
-    else showToast('⏳ Waiting for the list browser…');
+    beginHunterNavigation();
+    showToast('⏭ Finding next available list…');
   }
 
   // ── Main Hunter tick (Phase 3 hardened) ──────────────────────────────────
@@ -1608,6 +1647,13 @@
       // Watchdog first so nothing below can loop forever.
       hunterWatchdog();
       hunterLastActiveMs = Date.now();
+
+      // Auto-continue / Skip list navigation spans several SPA screens; keep
+      // driving it every tick until the next list's Start button was clicked.
+      if (hunterNavigationPending) {
+        driveHunterNavigation();
+        return;
+      }
 
     // LIST_DONE short-circuit: detected at top, even mid-state.
     if (detectListDone() &&
@@ -1796,31 +1842,15 @@
           // LIST_DONE is polled every 500 ms. Guard both the toast and the
           // sleep so repeated ticks cannot spam the user or queue navigation.
           if (hunterListSleepScheduled) return;
-          showToast('🏁 List complete');
           hunterListSleepScheduled = true;
           const sleepMs = clampMs(CFG.hunter.betweenListDelay,
                                   CFG.hunter.safeMinDelayMs,
                                   CFG.hunter.safeMaxDelayMs);
           const sleepSeconds = (sleepMs / 1000).toFixed(sleepMs % 1000 ? 1 : 0);
-          showToast('💤 Sleeping ' + sleepSeconds + 's before next list…');
+          showToast('🏁 List complete · 💤 next list in ' + sleepSeconds + 's…');
           hunterDefer(() => {
             if (!hunterEnabled) return;
-            const moved = autoNextList();
-            if (moved) {
-              hunterDefer(() => {
-            
-                hunterSetState('IDLE');
-                hunterQuestion  = '';
-                hunterAdvancing = false;
-                hunterListSleepScheduled = false;
-                lastFilled      = '';
-                updateHunterDebug();
-              }, 800);
-            } else {
-          
-              showToast('🏁 No more lists — Hunter stopped');
-              stopHunter();
-            }
+            beginHunterNavigation();
           }, sleepMs);
           return;
         }
@@ -1883,7 +1913,7 @@
       hunterBadgeEl.style.display = 'none';
       return;
     }
-    hunterBadgeEl.style.display = '';
+    hunterBadgeEl.style.display = 'block';
     const total = hunterQuestionsAnswered;
     const avg = hunterQuestionTimes.length
       ? Math.round(hunterQuestionTimes.reduce((a, b) => a + b, 0) / hunterQuestionTimes.length)
@@ -1955,6 +1985,10 @@
     hunterHumanActive      = false;
     hunterHumanSuspended   = false;
     hunterQuestionsAnswered = 0;
+    hunterQuestionTimes     = [];
+    hunterQuestionStartMs   = 0;
+    hunterVerdictHandledKey = '';
+    resetHunterNavigation();
     if (hunterHumanTimer) {
       clearTimeout(hunterHumanTimer);
       hunterHumanTimer = null;
@@ -1967,6 +2001,7 @@
     addHumanListeners();
 
     hunterTimer = setInterval(hunterTick, 500);
+    startEtaTicker();
     console.log('[Hunter] Started (Phase 3 hardened; errorPolicy=' + CFG.hunter.errorPolicy + ')');
     showToast('🕵️ Hunter mode ON');
     setDebug('🕵️ Hunter ready');
@@ -2005,14 +2040,18 @@
     document.removeEventListener('scroll',  onHumanInteraction, true);
   }
 
-  /** Stop Hunter Mode. Idempotent. */
-  function stopHunter() {
+  /** Stop Hunter Mode. Idempotent. `quiet` skips the session-summary toast
+   *  (used by the STOP kill-switch, which shows its own). */
+  function stopHunter(quiet) {
     if (hunterTimer) {
       clearInterval(hunterTimer);
       hunterTimer = null;
     }
     clearHunterDelayedTimers();
+    resetHunterNavigation();
     hunterEnabled          = false;
+    hunterAdvancing        = false;
+    stopEtaTicker();
     hunterState            = 'IDLE';
     hunterAdvancing        = false;
     hunterQuestion         = '';
@@ -2027,7 +2066,9 @@
     console.log('[Hunter] Stopped');
 
     const total = hunterScore.correct + hunterScore.incorrect;
-    if (total > 0) {
+    if (quiet) {
+      // caller shows its own toast
+    } else if (total > 0) {
       const pct = Math.round((hunterScore.correct / total) * 100);
       const elapsed = Math.floor((Date.now() - hunterStartTime) / 1000);
       const mins = Math.floor(elapsed / 60);
@@ -2076,6 +2117,8 @@
       .ep-btn.stop-btn{background:#6d2222 !important}
       .ep-btn.stop-btn:hover{background:#8a2c2c !important}
       .paused{background:#6d2222 !important}
+      #ep-badge{display:none;margin-bottom:8px;padding:5px 8px;border-radius:8px;
+        background:#14301c;color:#4ad97d;font-size:11px;font-weight:600}
       #ep-hint{font-size:11px;color:#68708f;line-height:1.5}
       #ep-debug{margin-top:10px;font-size:10px;color:#58607a;word-break:break-word}
       #ep-toast{position:fixed;bottom:22px;right:18px;z-index:2147483647;
@@ -2109,6 +2152,7 @@
         <div id="ep-btns3" style="display:flex;gap:5px;margin-bottom:8px">
           <button class="ep-btn stop-btn" id="ep-stop">🛑 STOP</button>
         </div>
+        <div id="ep-badge"></div>
         <div id="ep-hint">Select a task to activate.</div>
         <div id="ep-debug"></div>
       </div>
@@ -2123,6 +2167,7 @@
     hunterBtn  = panel.querySelector('#ep-hunter');
     skipBtn    = panel.querySelector('#ep-skip');
     stopBtn    = panel.querySelector('#ep-stop');
+    hunterBadgeEl = panel.querySelector('#ep-badge');
 
     autoBtn.addEventListener('click', () => {
       showToast('Auto mode');
@@ -2154,28 +2199,10 @@
 
     // ── Kill-switch STOP button (Phase 2) ──
     stopBtn.addEventListener('click', () => {
-      // STOP is a one-shot kill-switch; even if Hunter is already off it
-      // resets all transient state, removes listeners, etc.
-      if (hunterTimer) {
-        clearInterval(hunterTimer);
-        hunterTimer = null;
-      }
-      hunterEnabled          = false;
-      hunterState            = 'IDLE';
-      hunterAdvancing        = false;
-      hunterQuestion         = '';
-      hunterHumanActive      = false;
-      hunterHumanSuspended   = false;
-      if (hunterHumanTimer) { clearTimeout(hunterHumanTimer); hunterHumanTimer = null; }
-      document.removeEventListener('keydown', onHumanInteraction, true);
-      document.removeEventListener('click',    onHumanInteraction, true);
-      document.removeEventListener('input',    onHumanInteraction, true);
-      if (hunterBtn) {
-        hunterBtn.classList.remove('hunter-active');
-        hunterBtn.textContent = '🕵️ Hunter';
-      }
+      // STOP is a one-shot kill-switch that uses the same full teardown as
+      // the Hunter toggle, so it is safe even if Hunter is already off.
+      stopHunter(true);
       showToast('🛑 Hunter killed');
-      setDebug('');
     });
 
     makeDraggable(panel, panel.querySelector('#ep-handle'));
