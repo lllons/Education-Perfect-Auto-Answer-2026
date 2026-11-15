@@ -63,13 +63,13 @@ Pass 2 additions (verified live): **vocab-only filter** — the row icon's SVG `
 
 Other open points: the vocab grid can be missed on launch (see C); end-of-list detection is unverified (D).
 
-## "No vocab found" on Chinese lists (open, partly fixed 2026-11-16 11:2x)
+## "No vocab found" on Chinese lists (fixed and verified live 2026-11-16)
 
-- Fixed in code: `norm()` only kept `a-z0-9`, so every non-Latin word (Chinese, Japanese, Arabic…) normalised to `''` and `loadAnswers` dropped all pairs. It now keeps Unicode letters/digits (`\p{L}\p{N}`). Unit-checked in Node only.
-- Fixed in code: `loadAnswers` retries up to 12 × 1 s while on `list-starter` with 0 pairs, and no longer clicks Start with 0 pairs.
-- STILL FAILING live: after both fixes a Chinese list (`/app/Chinese/8998121/7594964`) still ended with `❌ No vocab found` and the game opened with an empty `answerMap`. The grid had 12 `.targetLanguage.question-label` + 12 `.baseLanguage.question-label` when inspected on list-starter, so the selectors match; the failure is timing or who starts the game.
-- Open questions for the next pass: (1) what opens the game from list-starter in this flow (Hunter idle auto-start needs a non-empty `answerMap`, so something else does; check `scoutRestoreCurrent`/`scoutReplay` and EP's own redirect), (2) `fullList()` waits 500 ms + 1000 ms before the first `loadAnswers` and EP can leave list-starter sooner, so poll the grid every ~100 ms right after arriving instead, (3) Chinese game questions look like `下午好, xià wǔ hǎo` (word + pinyin) while grid cells are `下午好; xià wǔ hǎo`; `findAnswer`'s `includes` matching should cover it, verify once the map loads.
-- Test recipe: open `/app/dashboard/chinese/content/`, inject, press a Chinese button in the Scout panel, then read `#ep-count` and log `loadAnswers` counts.
+- Cause 1: `norm()` only kept `a-z0-9`, so every non-Latin word (Chinese, Japanese, Arabic…) normalised to `''` and `loadAnswers` dropped all pairs. It now keeps Unicode letters/digits (`p{L}p{N}`).
+- Cause 2: Hunter's `startHunter()` hydrates learned pairs into `answerMap`, so the idle auto-start guard `Object.keys(answerMap).length > 0` was already true and Hunter clicked Start on list-starter before `loadAnswers` read the grid; the game opened with an empty map. The guard is now `vocabFromGrid`, set only when `loadAnswers` reads pairs from the grid (reset where `answerMap` is reset).
+- Also: `loadAnswers` retries up to 12 × 1 s while on `list-starter` with 0 pairs and no longer clicks Start with 0 pairs.
+- Verified live: Scout panel → Chinese list → `[EP] Loaded 24 pairs` (12 words, both directions), question `下午好, xià wǔ hǎo` got `good afternoon` typed; Enter left to the user.
+- Test caveat: the Tampermonkey copy in the user's Chrome runs its own (older) build. Injecting a second copy gives two panels and duplicate ids (`getElementById` hits the first panel), so my build's Scout list renders into the first panel. Update/disable the Tampermonkey copy before testing, or the user's real run keeps the old behaviour.
 
 ## Phase 4 continuation checklist
 

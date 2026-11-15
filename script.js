@@ -148,6 +148,7 @@
   let auto          = true;
   let panelUnlocked = false;
   let vocabUnlocked = false;
+  let vocabFromGrid = false;   // answerMap was read from the list's vocab grid (learned pairs alone don't count)
   let aiUnlocked    = false;
 
   // ─── Phase 3: Universal DOM helpers ───────────────────────────────────────
@@ -437,6 +438,7 @@
       return 0;
     }
     answerMap = map;
+    vocabFromGrid = count > 0;
     lastFilled = '';
     cooldownUntil = 0;
     updatePanel(count);
@@ -2327,7 +2329,7 @@
       // the assistant has no answers for.
       // A played, tracked list that returned to its starter is waiting for the
       // finish check; restarting it here would undo it.
-      if (url.includes('list-starter') && vocabUnlocked && Object.keys(answerMap).length > 0 &&
+      if (url.includes('list-starter') && vocabUnlocked && vocabFromGrid &&
           !(scoutCurrent && scoutCurrent.played)) {
         const startMain = queryVisible('#start-button-main');
         if (startMain) safeClick(startMain);
@@ -2725,6 +2727,7 @@
     if (url.includes('activity-starter')) aiUnlocked = true;
     if (vocabUnlocked && !url.includes('list-starter') && !url.includes('game')) {
       vocabUnlocked = false;
+      vocabFromGrid = false;
       answerMap     = {};
       if (panel) panel.querySelector('#ep-count').textContent = 'Not loaded';
     }
