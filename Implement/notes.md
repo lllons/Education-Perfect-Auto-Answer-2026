@@ -63,6 +63,14 @@ Pass 2 additions (verified live): **vocab-only filter** — the row icon's SVG `
 
 Other open points: the vocab grid can be missed on launch (see C); end-of-list detection is unverified (D).
 
+## "No vocab found" on Chinese lists (open, partly fixed 2026-11-16 11:2x)
+
+- Fixed in code: `norm()` only kept `a-z0-9`, so every non-Latin word (Chinese, Japanese, Arabic…) normalised to `''` and `loadAnswers` dropped all pairs. It now keeps Unicode letters/digits (`\p{L}\p{N}`). Unit-checked in Node only.
+- Fixed in code: `loadAnswers` retries up to 12 × 1 s while on `list-starter` with 0 pairs, and no longer clicks Start with 0 pairs.
+- STILL FAILING live: after both fixes a Chinese list (`/app/Chinese/8998121/7594964`) still ended with `❌ No vocab found` and the game opened with an empty `answerMap`. The grid had 12 `.targetLanguage.question-label` + 12 `.baseLanguage.question-label` when inspected on list-starter, so the selectors match; the failure is timing or who starts the game.
+- Open questions for the next pass: (1) what opens the game from list-starter in this flow (Hunter idle auto-start needs a non-empty `answerMap`, so something else does; check `scoutRestoreCurrent`/`scoutReplay` and EP's own redirect), (2) `fullList()` waits 500 ms + 1000 ms before the first `loadAnswers` and EP can leave list-starter sooner, so poll the grid every ~100 ms right after arriving instead, (3) Chinese game questions look like `下午好, xià wǔ hǎo` (word + pinyin) while grid cells are `下午好; xià wǔ hǎo`; `findAnswer`'s `includes` matching should cover it, verify once the map loads.
+- Test recipe: open `/app/dashboard/chinese/content/`, inject, press a Chinese button in the Scout panel, then read `#ep-count` and log `loadAnswers` counts.
+
 ## Phase 4 continuation checklist
 
 - Keep the progress badge hidden while Hunter is off and update it from a bounded rolling duration sample.

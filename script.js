@@ -354,7 +354,9 @@
     return (s || '')
       .toLowerCase()
       .normalize('NFD').replace(/[̀-ͯ]/g, '')
-      .replace(/[^a-z0-9\s+\-*/x=]/g, '')
+      // Unicode letters/digits, not just a-z: non-Latin scripts (Chinese,
+      // Japanese, Arabic…) otherwise normalise to '' and every pair is dropped.
+      .replace(/[^\p{L}\p{N}\s+\-*/=]/gu, '')
       .replace(/\s+/g, ' ')
       .trim();
   }
@@ -404,7 +406,7 @@
     }, 500);
   }
 
-  function loadAnswers() {
+  function loadAnswers(attempt = 0) {
     document.querySelector('#slim-scroll-content .preview-grid')?.lastElementChild?.scrollIntoView({ block: 'end' });
     const map = {};
     let count = 0;
@@ -423,13 +425,19 @@
         if (!map[normB]) { map[normB] = t; count++; }
       }
     }
+    // Slow subjects render the vocab grid late: retry instead of starting a
+    // game the assistant has no answers for.
+    if (count === 0 && attempt < 12 && window.location.href.toLowerCase().includes('list-starter')) {
+      setTimeout(() => loadAnswers(attempt + 1), 1000);
+      return 0;
+    }
     answerMap = map;
     lastFilled = '';
     cooldownUntil = 0;
     updatePanel(count);
     showToast(count > 0 ? `✅ ${count} pairs loaded` : `⚠️ No vocab found`);
     console.log('[EP] Loaded', count, 'pairs');
-    document.getElementById("start-button-main-label").click();
+    if (count > 0) document.getElementById("start-button-main-label")?.click();
     return count;
   }
 
