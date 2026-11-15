@@ -90,9 +90,18 @@
     // maxFolders = folders opened per Scout press (press again to continue),
     // rescanMs = a fully scanned folder is skipped for this long.
     scout: {
-      // Library subjects treated as languages by "All languages".
-      languages       : ['arabic', 'chinese', 'french', 'german', 'italian', 'japanese', 'korean',
-                         'latin', 'maori', 'te-reo-maori', 'russian', 'samoan', 'spanish', 'tongan'],
+      // Library subjects treated as languages by "All languages". Slugs that the
+      // Library does not list are ignored, so extra names are harmless.
+      languages       : ['afrikaans', 'albanian', 'amharic', 'arabic', 'australian-languages', 'azerbaijani',
+                         'bosnian', 'bulgarian', 'cantonese', 'chin-hakha', 'chinese', 'cook-islands-maori',
+                         'croatian', 'dari', 'dinka', 'dutch', 'esperanto', 'fijian', 'filipino', 'finnish',
+                         'french', 'german', 'greek', 'hebrew', 'hindi', 'hungarian', 'indonesian', 'irish',
+                         'italian', 'japanese', 'kannada', 'karen', 'khmer', 'korean', 'latin', 'macedonian',
+                         'malay', 'malayalam', 'maltese', 'maori', 'mizo', 'mongolian', 'myanmar-language',
+                         'papiamento', 'pashto', 'persian', 'polish', 'portuguese', 'punjabi', 'romanian',
+                         'russian', 'samoan', 'serbian', 'sign-language', 'sinhala', 'slovene', 'spanish',
+                         'swahili', 'swedish', 'syriac', 'tamil', 'telugu', 'thai', 'tongan', 'turkish',
+                         'ukrainian', 'urdu', 'vietnamese', 'welsh'],
       renderTimeoutMs : 12000,
       maxFolders      : 80,
       rescanMs        : 24 * 60 * 60 * 1000,
@@ -1578,6 +1587,7 @@
   // submits answers. The user presses Enter; the base assistant types.
   const SCOUT_KEY         = 'ep.scout';          // { [language]: { at, lists, folders } }
   const SCOUT_PENDING_KEY = 'ep.scout.pending';  // list to open after a full page load
+  const SCOUT_CURRENT_KEY = 'ep.scout.current';  // list in progress, survives a reload
   const SCOUT_ROOT_RE     = /\/app\/dashboard\/([^/]+)\/content\/?$/i;
   const scoutSleep        = ms => new Promise(r => setTimeout(r, ms));
   let scoutRunning = false;
@@ -1604,9 +1614,23 @@
       .map(row => {
         const pct = parseInt(navText(row.querySelector('.completion-percentage')), 10);
         return { row, title: navText(row.querySelector('.item-title')),
-                 folder: isFolderNavigationRow(row), progress: isNaN(pct) ? 0 : pct };
+                 folder: isFolderNavigationRow(row), progress: isNaN(pct) ? 0 : pct,
+                 // Activity icon <title>: "Translation list" = vocab, "Smart lesson" = video.
+                 kind: navText(row.querySelector('.activity-icon title')) };
       })
       .filter(r => r.title);
+  }
+
+  /** Only vocabulary lists are queued; unknown kinds (older scans) stay visible. */
+  function scoutIsVocab(l) { return !l.kind || /translation list|vocab/i.test(l.kind); }
+
+  /** Remember the launched list (also across a page reload) or clear it. */
+  function scoutSetCurrent(t) {
+    scoutCurrent = t;
+    try {
+      if (t) localStorage.setItem(SCOUT_CURRENT_KEY, JSON.stringify(t));
+      else localStorage.removeItem(SCOUT_CURRENT_KEY);
+    } catch (e) {}
   }
 
   /** Wait until the rows stop changing. `urlBefore` = wait for the click to
@@ -1644,7 +1668,7 @@
     for (const r of scoutRows().filter(x => !x.folder)) {
       const key = path.concat(r.title).join(' › ');
       store.lists[key] = Object.assign(store.lists[key] || {}, {
-        title: r.title, folderPath: path, folderId, progress: r.progress,
+        title: r.title, folderPath: path, folderId, progress: r.progress, kind: r.kind,
         done: r.progress >= 100 || isCompletedTask(r.row),
       });
     }
@@ -1675,6 +1699,8 @@
     const all = scoutLoad();
     const store = all[lang] = all[lang] || { at: 0, lists: {}, folders: {} };
     scoutSteps = 0;
+    // Scans from before list kinds were recorded must be redone once.
+    if (Object.values(store.lists).some(l => !('kind' in l))) store.folders = {};
     showToast('🔭 Scouting ' + lang + '…');
     if (!(await scoutGoRoot())) { showToast('🔭 Could not reach the ' + lang + ' content root'); return false; }
     const complete = await scoutVisit(store, [], '', all);
@@ -1723,7 +1749,7 @@
           if (!(await scoutRunLang(slug))) complete = false;
         }
       } else showToast('🔭 Could not open the Library');
-      const open = Object.values(scoutLoad()).reduce((n, s) => n + Object.values(s.lists).filter(l => !l.done).length, 0);
+      const open = Object.values(scoutLoad()).reduce((n, s) => n + Object.values(s.lists).filter(l => !l.done && scoutIsVocab(l)).length, 0);
       showToast(complete ? '🔭 Scout done · ' + open + ' undone lists'
                          : '🔭 Scout paused (' + (scoutCancel ? 'stopped' : 'cap') + ') · ' + open + ' undone — press Scout to continue');
     } catch (e) {
@@ -1748,7 +1774,7 @@
     }
     const l = scoutRows().find(x => !x.folder && x.title === target.title);
     if (!l || !safeClick(l.row)) { showToast('🔭 List “' + target.title + '” not found'); return false; }
-    scoutCurrent = target;
+    scoutSetCurrent({ lang: target.lang, path: target.path, title: target.title, played: false });
     showToast('🔭 Launching ' + target.title);
     if (!hunterEnabled) startHunter();
     return true;
@@ -1770,6 +1796,18 @@
     scoutReplay(target);
   }
 
+  /** After a reload in the middle of a scouted list: keep auto-continue alive. */
+  function scoutRestoreCurrent() {
+    if (scoutCurrent) return;
+    const url = window.location.href.toLowerCase();
+    if (!(url.includes('game') || url.includes('list-starter') || url.includes('activity-starter'))) return;
+    let t = null;
+    try { t = JSON.parse(localStorage.getItem(SCOUT_CURRENT_KEY) || 'null'); } catch (e) {}
+    if (!t || !t.lang || !Array.isArray(t.path) || !t.title) return;
+    scoutCurrent = t;
+    if (!hunterEnabled) startHunter();
+  }
+
   function scoutMarkDone(t) {
     const all = scoutLoad();
     const e = all[t.lang] && all[t.lang].lists[t.path.concat(t.title).join(' › ')];
@@ -1784,7 +1822,7 @@
     const key = t.path.concat(t.title).join(' › ');
     const keys = Object.keys(store.lists);
     const rest = keys.slice(keys.indexOf(key) + 1).concat(keys.slice(0, Math.max(keys.indexOf(key), 0)));
-    const nk = rest.find(k => !store.lists[k].done && k !== key);
+    const nk = rest.find(k => !store.lists[k].done && scoutIsVocab(store.lists[k]) && k !== key);
     return nk ? { lang: t.lang, path: store.lists[nk].folderPath, title: store.lists[nk].title } : null;
   }
 
@@ -1795,7 +1833,7 @@
     box.textContent = '';
     const all = scoutLoad();
     for (const lang of Object.keys(all).sort()) {
-      const undone = Object.values(all[lang].lists || {}).filter(l => !l.done);
+      const undone = Object.values(all[lang].lists || {}).filter(l => !l.done && scoutIsVocab(l));
       const group = document.createElement('details');
       const sum = document.createElement('summary');
       sum.textContent = lang + ' (' + undone.length + ' undone)';
@@ -1930,6 +1968,10 @@
           hunterQuestion       = word;
           hunterQuestionStart  = Date.now();
           hunterQuestionStartMs = Date.now();
+          if (scoutCurrent && !scoutCurrent.played) {
+            scoutCurrent.played = true;
+            scoutSetCurrent(scoutCurrent);
+          }
           hunterSetState('DETECTED');
           hunterNoAdvance      = 0;
           console.log('[Hunter] DETECTED:', word);
@@ -2099,6 +2141,9 @@
         // A list launched from the Scout panel: mark it done and move the user
         // on to the next undone scouted list.
         if (scoutCurrent) {
+          // The starter screen of a freshly launched list also looks "done"
+          // (Continue/Restart label). Only a list whose questions were seen is finished.
+          if (!scoutCurrent.played) { hunterSetState('IDLE'); break; }
           if (hunterListSleepScheduled) return;
           hunterListSleepScheduled = true;
           const finished = scoutCurrent;
@@ -2113,7 +2158,7 @@
             hunterQuestion = '';
             lastFilled     = '';
             const next = scoutNextAfter(finished);
-            scoutCurrent = null;
+            scoutSetCurrent(null);
             if (next) scoutLaunch(next);
             else { showToast('🏁 No more scouted lists — Hunter stopped'); stopHunter(); }
           }, sleepMs);
@@ -2489,6 +2534,7 @@
     // ── Hunter toggle ──
     hunterBtn.addEventListener('click', () => {
       if (hunterEnabled) {
+        scoutSetCurrent(null);
         stopHunter();
       } else {
         startHunter();
@@ -2503,6 +2549,7 @@
       // STOP is a one-shot kill-switch that uses the same full teardown as
       // the Hunter toggle, so it is safe even if Hunter is already off.
       scoutCancel = true;
+      scoutSetCurrent(null);
       stopHunter(true);
       showToast('🛑 Hunter killed');
     });
@@ -2611,6 +2658,7 @@
     startPolling();
     updatePanelVisibility();
     scoutResumePending();
+    scoutRestoreCurrent();
 
     let lastUrl = location.href;
     setInterval(() => {

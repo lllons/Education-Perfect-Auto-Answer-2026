@@ -461,8 +461,10 @@ Status legend: ✅ shipped on `main` · 🟡 Planned — not in current release
 | Between-list sleep toast (`🏁 List complete · 💤 next list in Xs…`) | **Done** — shown once per list-complete transition | ✅ yes |
 | STOP uses the full `stopHunter(true)` teardown (timers, listeners, nav state, ETA ticker) | **Done** | ✅ yes |
 | Scout Mode: crawl + `ep.scout` storage, per-language, `🔭 Scout` / `🌍 All languages`, STOP cancels | **Done — verified live** (French, Chinese) | ✅ yes |
-| Scout Mode: expandable language → folder → list panel; list button launches the list and starts Hunter | **Done — verified live** (same language; cross-language resume not verified) | ✅ yes |
-| Scout Mode: auto-continue to the next undone scouted list after LIST_DONE | **Written — not verified live** (see `notes.md` handoff) | ✅ yes |
+| Scout Mode: expandable language → folder → list panel; list button launches the list and starts Hunter | **Done — verified live** (same language and cross-language resume; open issue: vocab grid can be missed on launch) | ✅ yes |
+| Scout Mode: vocabulary-only filter (icon `<title>` `Translation list` vs `Smart lesson`) | **Done — verified live** (Chinese 32 → 8) | ✅ yes |
+| Scout Mode: `scoutCurrent` persisted in `ep.scout.current`, restored after a reload, cleared by STOP | **Done — verified live** | ✅ yes |
+| Scout Mode: auto-continue to the next undone scouted list after LIST_DONE (false "done" on the starter screen fixed with a `played` guard) | **Written — not verified live** (needs a real finished list; see `notes.md` handoff) | ✅ yes |
 | Hunter idle auto-start on list-starter waits for loaded vocab | **Done — verified live** | ✅ yes |
 | Multi-step list navigation driven per tick (`driveHunterNavigation`, settle delay + attempt cap); fixes auto-continue treating `'exhausted'`/`'waiting'` as success | **Done in code — not yet verified live** | ✅ yes |
 
