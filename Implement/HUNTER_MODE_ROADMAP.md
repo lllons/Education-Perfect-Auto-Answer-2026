@@ -460,6 +460,10 @@ Status legend: ✅ shipped on `main` · 🟡 Planned — not in current release
 | Progress badge + ETA (live rolling-avg format `⚡ N answered · ~Xs/q`) | **Done** — `#ep-badge` is in the panel, hidden while Hunter is off, ticked at 1 Hz; verified live (`⚡ ready · measuring pace…`) | ✅ yes |
 | Between-list sleep toast (`🏁 List complete · 💤 next list in Xs…`) | **Done** — shown once per list-complete transition | ✅ yes |
 | STOP uses the full `stopHunter(true)` teardown (timers, listeners, nav state, ETA ticker) | **Done** | ✅ yes |
+| Scout Mode: crawl + `ep.scout` storage, per-language, `🔭 Scout` / `🌍 All languages`, STOP cancels | **Done — verified live** (French, Chinese) | ✅ yes |
+| Scout Mode: expandable language → folder → list panel; list button launches the list and starts Hunter | **Done — verified live** (same language; cross-language resume not verified) | ✅ yes |
+| Scout Mode: auto-continue to the next undone scouted list after LIST_DONE | **Written — not verified live** (see `notes.md` handoff) | ✅ yes |
+| Hunter idle auto-start on list-starter waits for loaded vocab | **Done — verified live** | ✅ yes |
 | Multi-step list navigation driven per tick (`driveHunterNavigation`, settle delay + attempt cap); fixes auto-continue treating `'exhausted'`/`'waiting'` as success | **Done in code — not yet verified live** | ✅ yes |
 
 ### Phase 5+ (planned, NOT shipped)

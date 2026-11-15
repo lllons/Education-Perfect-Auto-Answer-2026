@@ -86,6 +86,17 @@
       // Progress is discovered from the real #preview-grid/.stats-item DOM;
       // no hard-coded list length is assumed.
     },
+    // Scout Mode: renderTimeoutMs = max wait for a folder to render,
+    // maxFolders = folders opened per Scout press (press again to continue),
+    // rescanMs = a fully scanned folder is skipped for this long.
+    scout: {
+      // Library subjects treated as languages by "All languages".
+      languages       : ['arabic', 'chinese', 'french', 'german', 'italian', 'japanese', 'korean',
+                         'latin', 'maori', 'te-reo-maori', 'russian', 'samoan', 'spanish', 'tongan'],
+      renderTimeoutMs : 12000,
+      maxFolders      : 80,
+      rescanMs        : 24 * 60 * 60 * 1000,
+    },
   };
 
   const SEL = {
@@ -1562,6 +1573,253 @@
     showToast('⏭ Finding next available list…');
   }
 
+  // ── Scout Mode: crawl a subject's content tree → ep.scout → launch lists ──
+  // DOM-only. Scout navigates (folders, list rows) and tracks lists; it never
+  // submits answers. The user presses Enter; the base assistant types.
+  const SCOUT_KEY         = 'ep.scout';          // { [language]: { at, lists, folders } }
+  const SCOUT_PENDING_KEY = 'ep.scout.pending';  // list to open after a full page load
+  const SCOUT_ROOT_RE     = /\/app\/dashboard\/([^/]+)\/content\/?$/i;
+  const scoutSleep        = ms => new Promise(r => setTimeout(r, ms));
+  let scoutRunning = false;
+  let scoutCancel  = false;
+  let scoutSteps   = 0;
+  let scoutCurrent = null;   // { lang, path[], title } of the list Scout launched
+
+  function scoutLoad() {
+    try {
+      const d = JSON.parse(localStorage.getItem(SCOUT_KEY) || '{}');
+      return d && typeof d === 'object' ? d : {};
+    } catch (e) { return {}; }
+  }
+  function scoutSave(d) { try { localStorage.setItem(SCOUT_KEY, JSON.stringify(d)); } catch (e) {} }
+  function scoutLang() {
+    const m = window.location.pathname.match(/\/app\/dashboard\/([^/]+)\/content/i);
+    return m ? decodeURIComponent(m[1]).toLowerCase() : '';
+  }
+
+  /** Visible rows of the content browser: folders and lists with progress. */
+  function scoutRows() {
+    return queryAllVisible(NAV_SEL.folderItems)
+      .filter(row => !row.closest('#ep-panel'))
+      .map(row => {
+        const pct = parseInt(navText(row.querySelector('.completion-percentage')), 10);
+        return { row, title: navText(row.querySelector('.item-title')),
+                 folder: isFolderNavigationRow(row), progress: isNaN(pct) ? 0 : pct };
+      })
+      .filter(r => r.title);
+  }
+
+  /** Wait until the rows stop changing. `urlBefore` = wait for the click to
+   *  change the URL first. Resolves true when stable, false on timeout/cancel. */
+  async function scoutSettle(urlBefore, timeoutMs) {
+    const deadline = Date.now() + (timeoutMs || CFG.scout.renderTimeoutMs);
+    let last = '', stable = 0;
+    while (Date.now() < deadline && !scoutCancel) {
+      await scoutSleep(350);
+      if (urlBefore && window.location.href === urlBefore) continue;
+      const sig = scoutRows().map(r => r.title + r.progress).join('|');
+      if (sig && sig === last) { if (++stable >= 2) return true; }
+      else { stable = 0; last = sig; }
+    }
+    return false;
+  }
+
+  /** Back to the subject's content root via the breadcrumb (SPA, no reload). */
+  async function scoutGoRoot() {
+    if (!SCOUT_ROOT_RE.test(window.location.pathname)) {
+      const name = queryVisible('span.name');
+      const crumb = name && (name.closest('a, button, [role="button"], li, [class*="crumb"]') || name);
+      const before = window.location.href;
+      if (!crumb || !safeClick(crumb)) return false;
+      await scoutSettle(before);
+    } else {
+      await scoutSettle(null, 30000);
+    }
+    return SCOUT_ROOT_RE.test(window.location.pathname);
+  }
+
+  /** Depth-first walk of the folder currently on screen. Returns true when the
+   *  whole subtree was scanned (false = cancelled or capped). */
+  async function scoutVisit(store, path, folderId, all) {
+    for (const r of scoutRows().filter(x => !x.folder)) {
+      const key = path.concat(r.title).join(' › ');
+      store.lists[key] = Object.assign(store.lists[key] || {}, {
+        title: r.title, folderPath: path, folderId, progress: r.progress,
+        done: r.progress >= 100 || isCompletedTask(r.row),
+      });
+    }
+    scoutSave(all);
+    for (const f of scoutRows().filter(x => x.folder)) {
+      if (scoutCancel || scoutSteps >= CFG.scout.maxFolders) return false;
+      const sub = path.concat(f.title), key = sub.join(' › ');
+      if (store.folders[key] && Date.now() - store.folders[key] < CFG.scout.rescanMs) continue;
+      const cur = scoutRows().find(x => x.folder && x.title === f.title);
+      const before = window.location.href;
+      if (!cur || !safeClick(cur.row)) continue;
+      scoutSteps++;
+      setDebug('🔭 ' + scoutSteps + ' folders · ' + Object.keys(store.lists).length + ' lists · ' + key.slice(-30));
+      await scoutSettle(before);
+      const ok = await scoutVisit(store, sub, (window.location.pathname.match(/\/content\/(\d+)/) || [])[1] || '', all);
+      window.history.back();
+      for (let i = 0; i < 30 && window.location.href !== before && !scoutCancel; i++) await scoutSleep(300);
+      await scoutSettle();
+      if (!ok) return false;
+      store.folders[key] = Date.now();
+      scoutSave(all);
+    }
+    return true;
+  }
+
+  /** Crawl the language whose content browser is on screen, from its root. */
+  async function scoutRunLang(lang) {
+    const all = scoutLoad();
+    const store = all[lang] = all[lang] || { at: 0, lists: {}, folders: {} };
+    scoutSteps = 0;
+    showToast('🔭 Scouting ' + lang + '…');
+    if (!(await scoutGoRoot())) { showToast('🔭 Could not reach the ' + lang + ' content root'); return false; }
+    const complete = await scoutVisit(store, [], '', all);
+    store.at = Date.now();
+    scoutSave(all);
+    renderScoutList();
+    return complete;
+  }
+
+  /** Language subjects listed on the Library page (links are SPA anchors). */
+  function scoutLanguageLinks() {
+    return [...document.querySelectorAll('a[href^="/app/dashboard/"][href*="/content"]')]
+      .map(a => ({ slug: decodeURIComponent(a.getAttribute('href').split('/')[3] || '').toLowerCase(), link: a }))
+      .filter(x => CFG.scout.languages.includes(x.slug));
+  }
+
+  /** Go to the Library through the sidebar link (no page reload). */
+  async function scoutOpenLibrary() {
+    if (!window.location.pathname.startsWith('/learning/library')) {
+      const link = queryVisible('a[href="/learning/library"]');
+      if (!link || !safeClick(link)) return false;
+    }
+    for (let i = 0; i < 60 && !scoutCancel && scoutLanguageLinks().length === 0; i++) await scoutSleep(500);
+    return scoutLanguageLinks().length > 0;
+  }
+
+  /** Scout button = current language; `everyLanguage` walks the Library list. */
+  async function scoutCrawl(everyLanguage) {
+    if (scoutRunning) { scoutCancel = true; return; }
+    const lang = scoutLang();
+    if (!everyLanguage && !lang) { showToast('🔭 Open a subject’s content page first'); return; }
+    scoutRunning = true; scoutCancel = false;
+    if (scoutBtn) scoutBtn.textContent = '⏹ Scouting…';
+    let complete = true;
+    try {
+      if (!everyLanguage) complete = await scoutRunLang(lang);
+      else if (await scoutOpenLibrary()) {
+        const slugs = [...new Set(scoutLanguageLinks().map(x => x.slug))];
+        for (const slug of slugs) {
+          if (scoutCancel) { complete = false; break; }
+          if (!(await scoutOpenLibrary())) break;
+          const item = scoutLanguageLinks().find(x => x.slug === slug);
+          if (!item || !safeClick(item.link)) continue;
+          for (let i = 0; i < 60 && !scoutCancel && scoutLang() !== slug; i++) await scoutSleep(500);
+          await scoutSettle(null, 30000);
+          if (!(await scoutRunLang(slug))) complete = false;
+        }
+      } else showToast('🔭 Could not open the Library');
+      const open = Object.values(scoutLoad()).reduce((n, s) => n + Object.values(s.lists).filter(l => !l.done).length, 0);
+      showToast(complete ? '🔭 Scout done · ' + open + ' undone lists'
+                         : '🔭 Scout paused (' + (scoutCancel ? 'stopped' : 'cap') + ') · ' + open + ' undone — press Scout to continue');
+    } catch (e) {
+      console.warn('[Scout] crawl threw', e);
+      showToast('🔭 Scout error — see console');
+    }
+    scoutRunning = false; scoutCancel = false; setDebug('');
+    if (scoutBtn) scoutBtn.textContent = '🔭 Scout';
+    renderScoutList();
+  }
+
+  /** Replay a folder path from the root, then click the list row (EP launches
+   *  the game straight from the row) and make sure Hunter is on. */
+  async function scoutReplay(target) {
+    scoutCancel = false;
+    if (!(await scoutGoRoot())) { showToast('🔭 Could not reach the content root'); return false; }
+    for (const name of target.path) {
+      const f = scoutRows().find(x => x.folder && x.title === name);
+      const before = window.location.href;
+      if (!f || !safeClick(f.row)) { showToast('🔭 Folder “' + name + '” not found'); return false; }
+      await scoutSettle(before);
+    }
+    const l = scoutRows().find(x => !x.folder && x.title === target.title);
+    if (!l || !safeClick(l.row)) { showToast('🔭 List “' + target.title + '” not found'); return false; }
+    scoutCurrent = target;
+    showToast('🔭 Launching ' + target.title);
+    if (!hunterEnabled) startHunter();
+    return true;
+  }
+
+  /** Open a scouted list; a different language needs a full load first. */
+  function scoutLaunch(target) {
+    if (scoutLang() === target.lang) return scoutReplay(target);
+    try { localStorage.setItem(SCOUT_PENDING_KEY, JSON.stringify(target)); } catch (e) {}
+    window.location.assign('/app/dashboard/' + encodeURIComponent(target.lang) + '/content/');
+  }
+
+  /** After a full page load: finish a launch that was waiting for it. */
+  function scoutResumePending() {
+    let target = null;
+    try { target = JSON.parse(localStorage.getItem(SCOUT_PENDING_KEY) || 'null'); } catch (e) {}
+    if (!target || scoutLang() !== target.lang) return;
+    try { localStorage.removeItem(SCOUT_PENDING_KEY); } catch (e) {}
+    scoutReplay(target);
+  }
+
+  function scoutMarkDone(t) {
+    const all = scoutLoad();
+    const e = all[t.lang] && all[t.lang].lists[t.path.concat(t.title).join(' › ')];
+    if (e) { e.done = true; e.progress = 100; scoutSave(all); }
+    renderScoutList();
+  }
+
+  /** Next undone scouted list after `t` in the same language (scan order). */
+  function scoutNextAfter(t) {
+    const all = scoutLoad(), store = all[t.lang];
+    if (!store) return null;
+    const key = t.path.concat(t.title).join(' › ');
+    const keys = Object.keys(store.lists);
+    const rest = keys.slice(keys.indexOf(key) + 1).concat(keys.slice(0, Math.max(keys.indexOf(key), 0)));
+    const nk = rest.find(k => !store.lists[k].done && k !== key);
+    return nk ? { lang: t.lang, path: store.lists[nk].folderPath, title: store.lists[nk].title } : null;
+  }
+
+  /** Expandable language → folder → undone-list buttons in the panel. */
+  function renderScoutList() {
+    const box = document.getElementById('ep-scout-list');
+    if (!box) return;
+    box.textContent = '';
+    const all = scoutLoad();
+    for (const lang of Object.keys(all).sort()) {
+      const undone = Object.values(all[lang].lists || {}).filter(l => !l.done);
+      const group = document.createElement('details');
+      const sum = document.createElement('summary');
+      sum.textContent = lang + ' (' + undone.length + ' undone)';
+      group.appendChild(sum);
+      const byFolder = {};
+      undone.forEach(l => (byFolder[l.folderPath.join(' › ') || '(root)'] = byFolder[l.folderPath.join(' › ') || '(root)'] || []).push(l));
+      for (const folder of Object.keys(byFolder)) {
+        const fd = document.createElement('details');
+        const fs = document.createElement('summary');
+        fs.textContent = folder + ' (' + byFolder[folder].length + ')';
+        fd.appendChild(fs);
+        for (const l of byFolder[folder]) {
+          const b = document.createElement('button');
+          b.className = 'scout-list-btn';
+          b.textContent = l.title + (l.progress ? ' · ' + l.progress + '%' : '');
+          b.addEventListener('click', () => scoutLaunch({ lang, path: l.folderPath, title: l.title }));
+          fd.appendChild(b);
+        }
+        group.appendChild(fd);
+      }
+      box.appendChild(group);
+    }
+  }
+
   // ── Main Hunter tick (Phase 3 hardened) ──────────────────────────────────
   //   Phase 3 helpers used inside hunterTick:
   //   - hunterDefer() schedules a callback; tracks handle in
@@ -1838,6 +2096,30 @@
       case 'LIST_DONE': {
         console.log('[Hunter] List / task complete.');
 
+        // A list launched from the Scout panel: mark it done and move the user
+        // on to the next undone scouted list.
+        if (scoutCurrent) {
+          if (hunterListSleepScheduled) return;
+          hunterListSleepScheduled = true;
+          const finished = scoutCurrent;
+          scoutMarkDone(finished);
+          const sleepMs = clampMs(CFG.hunter.betweenListDelay,
+                                  CFG.hunter.safeMinDelayMs,
+                                  CFG.hunter.safeMaxDelayMs);
+          showToast('🏁 List complete · 💤 next scouted list in ' + (sleepMs / 1000).toFixed(1) + 's…');
+          hunterDefer(() => {
+            hunterListSleepScheduled = false;
+            hunterSetState('IDLE');
+            hunterQuestion = '';
+            lastFilled     = '';
+            const next = scoutNextAfter(finished);
+            scoutCurrent = null;
+            if (next) scoutLaunch(next);
+            else { showToast('🏁 No more scouted lists — Hunter stopped'); stopHunter(); }
+          }, sleepMs);
+          return;
+        }
+
         if (CFG.hunter.autoContinueLists) {
           // LIST_DONE is polled every 500 ms. Guard both the toast and the
           // sleep so repeated ticks cannot spam the user or queue navigation.
@@ -1863,7 +2145,9 @@
     // Idle auto-start: keep Hunter busy by clicking start buttons on the
     // right page.
     if (CFG.hunter.autoStart && hunterState === 'IDLE') {
-      if (url.includes('list-starter') && vocabUnlocked) {
+      // Only start once the vocab is loaded; Start before that opens a game
+      // the assistant has no answers for.
+      if (url.includes('list-starter') && vocabUnlocked && Object.keys(answerMap).length > 0) {
         const startMain = queryVisible('#start-button-main');
         if (startMain) safeClick(startMain);
       } else if (url.includes('activity-starter')) {
@@ -2087,7 +2371,7 @@
 
   // ── UI ───────────────────────────────────────────────────────────────────
   let panel, countEl, toggleBtn, debugEl, autoBtn, aiBtn,
-      hunterBtn, skipBtn, stopBtn;
+      hunterBtn, skipBtn, stopBtn, scoutBtn;
 
   function setDebug(msg) { if (debugEl) debugEl.textContent = msg; }
 
@@ -2117,6 +2401,14 @@
       .ep-btn.stop-btn{background:#6d2222 !important}
       .ep-btn.stop-btn:hover{background:#8a2c2c !important}
       .paused{background:#6d2222 !important}
+      .ep-btn.scout-btn{background:#1b3f6d !important}
+      .ep-btn.scout-btn:hover{background:#25528a !important}
+      #ep-scout-list{max-height:240px;overflow:auto;margin-bottom:8px;font-size:11px}
+      #ep-scout-list summary{cursor:pointer;color:#6aa3f8;margin:3px 0}
+      #ep-scout-list details details{margin-left:8px}
+      .scout-list-btn{display:block;width:100%;text-align:left;margin:2px 0;padding:5px 7px;
+        background:#1b213a;color:#c4ccec;border:none;border-radius:6px;cursor:pointer;font-size:11px}
+      .scout-list-btn:hover{background:#28304d}
       #ep-badge{display:none;margin-bottom:8px;padding:5px 8px;border-radius:8px;
         background:#14301c;color:#4ad97d;font-size:11px;font-weight:600}
       #ep-hint{font-size:11px;color:#68708f;line-height:1.5}
@@ -2152,6 +2444,11 @@
         <div id="ep-btns3" style="display:flex;gap:5px;margin-bottom:8px">
           <button class="ep-btn stop-btn" id="ep-stop">🛑 STOP</button>
         </div>
+        <div id="ep-btns4" style="display:flex;gap:5px;margin-bottom:8px">
+          <button class="ep-btn scout-btn" id="ep-scout">🔭 Scout</button>
+          <button class="ep-btn scout-btn" id="ep-scout-all">🌍 All languages</button>
+        </div>
+        <div id="ep-scout-list"></div>
         <div id="ep-badge"></div>
         <div id="ep-hint">Select a task to activate.</div>
         <div id="ep-debug"></div>
@@ -2168,6 +2465,10 @@
     skipBtn    = panel.querySelector('#ep-skip');
     stopBtn    = panel.querySelector('#ep-stop');
     hunterBadgeEl = panel.querySelector('#ep-badge');
+    scoutBtn   = panel.querySelector('#ep-scout');
+    scoutBtn.addEventListener('click', () => scoutCrawl(false));
+    panel.querySelector('#ep-scout-all').addEventListener('click', () => scoutCrawl(true));
+    renderScoutList();
 
     autoBtn.addEventListener('click', () => {
       showToast('Auto mode');
@@ -2201,6 +2502,7 @@
     stopBtn.addEventListener('click', () => {
       // STOP is a one-shot kill-switch that uses the same full teardown as
       // the Hunter toggle, so it is safe even if Hunter is already off.
+      scoutCancel = true;
       stopHunter(true);
       showToast('🛑 Hunter killed');
     });
@@ -2270,10 +2572,18 @@
     if (hunterBtn) hunterBtn.style.display = isTaskPage ? '' : 'none';
     if (skipBtn)   skipBtn.style.display   = isTaskPage ? '' : 'none';
 
+    // Scout lives on the content browser (and stays reachable on task pages).
+    const isContentPage = url.includes('/content') || url.includes('/learning/library');
+    const btns4Row  = document.querySelector('#ep-btns4');
+    const scoutBox  = document.querySelector('#ep-scout-list');
+    if (btns4Row)  btns4Row.style.display  = isContentPage || isTaskPage ? 'flex' : 'none';
+    if (scoutBox)  scoutBox.style.display  = isContentPage || isTaskPage ? '' : 'none';
+
     // Kill-switch STOP is visible whenever Hunter is enabled or any task
     // page is open, so the user can always force-quit Hunter.
-    if (btns3Row)  btns3Row.style.display  = isTaskPage || hunterEnabled ? 'flex' : 'none';
-    if (stopBtn)   stopBtn.style.display   = isTaskPage || hunterEnabled ? '' : 'none';
+    const showStop = isTaskPage || isContentPage || hunterEnabled;
+    if (btns3Row)  btns3Row.style.display  = showStop ? 'flex' : 'none';
+    if (stopBtn)   stopBtn.style.display   = showStop ? '' : 'none';
 
     if (hintTxt) hintTxt.style.display = hints ? '' : 'none';
     if (vocabUnlocked) hintTxt.innerHTML = hintsList.list;
@@ -2300,6 +2610,7 @@
     startObserver();
     startPolling();
     updatePanelVisibility();
+    scoutResumePending();
 
     let lastUrl = location.href;
     setInterval(() => {
