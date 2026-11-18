@@ -84,6 +84,11 @@
       // startWaitMs a "vocab did not load" toast is shown (still no Start).
       startRetriggerMs   : 4000,
       startWaitMs        : 20000,
+      // Mode check on a starter: the per-mode progress must read the same for
+      // modeSettleMs before it decides; a mode that was run maxModeRuns times
+      // without reaching 100% is given up on (no endless repeat).
+      modeSettleMs       : 1500,
+      maxModeRuns        : 3,
       // ── Phase 3 additions ──
       maxAdvanceAttempts : 5,
       stuckStateMs       : 30000,
@@ -255,11 +260,25 @@
     return waitedMs > timeoutMs ? 'timeout' : 'wait';
   }
 
-  /** Key of the next undone list after `key` in scan order (wraps), or null. */
-  function pickNextKey(lists, key, isVocab) {
+  /** Key of the next undone list after `key` in scan order (wraps), or null.
+   *  `isUsable` filters lists that may be hunted (vocab kind, not skipped). */
+  function pickNextKey(lists, key, isUsable) {
     const keys = Object.keys(lists), i = keys.indexOf(key);
     const rest = keys.slice(i + 1).concat(keys.slice(0, Math.max(i, 0)));
-    return rest.find(k => !lists[k].done && isVocab(lists[k]) && k !== key) || null;
+    return rest.find(k => !lists[k].done && isUsable(lists[k]) && k !== key) || null;
+  }
+
+  /** What is left to run on a list, from the starter's per-mode progress.
+   *  Each status is 'learnt' | 'open' | 'unknown' (item without a readable
+   *  percentage) | 'absent' (no such mode item). Returns 'reading' | 'writing',
+   *  null = both learnt (list complete), undefined = cannot tell (no item at all
+   *  or unreadable progress → caller falls back to the stage order). */
+  function remainingMode(reading, writing) {
+    if (reading === 'unknown' || writing === 'unknown') return undefined;
+    if (reading === 'absent' && writing === 'absent') return undefined;
+    if (reading === 'open') return 'reading';
+    if (writing === 'open') return 'writing';
+    return null;
   }
   // PURE-LOGIC-END
 
@@ -324,6 +343,9 @@
   let hunterStartRetriggered   = false;   // start gate: loader re-triggered once
   let hunterStartTimedOut      = false;   // start gate: timeout toast shown once
   let hunterModeTries          = 0;       // start gate: mode-item clicks for this start
+  let hunterModeRuns           = { reading: 0, writing: 0 };  // finished runs of this list, per mode
+  let hunterDecisionKey        = '';      // mode check: last reading of the starter's per-mode progress
+  let hunterDecisionSince      = 0;       // mode check: since when it read the same
   let hunterSyntheticInput     = false;
   let hunterTypingTransitionScheduled = false;
   let hunterVerdictHandledKey  = '';
@@ -359,6 +381,7 @@
     hunterLastDirection      = 'auto';
     hunterListSleepScheduled = false;
     hunterListPlayed         = false;
+    hunterModeRuns           = { reading: 0, writing: 0 };
   }
 
   // ─── Phase 3: lifecycle / watcher plumbing ───────────────────────────────
@@ -1452,6 +1475,17 @@
       (label.classList.contains('learnt') || parseInt(navText(label), 10) >= 100));
   }
 
+  /** Progress status of a mode item for remainingMode(). EP hides the label at
+   *  0% (`ng-show="item.percentage > 0"`, class `ng-hide`) but keeps its text
+   *  ("0%", verified live), so the text is read even when it is not visible. */
+  function hunterModeStatus(item) {
+    if (!item) return 'absent';
+    const label = item.querySelector('.percentage-label');
+    if (!label) return 'unknown';
+    if (hunterModeLearnt(item)) return 'learnt';
+    return isNaN(parseInt(navText(label), 10)) ? 'unknown' : 'open';
+  }
+
   /** Reuse the existing EP start controls, including the modern preview header button. */
   function clickHunterStartButton() {
     for (const selector of NAV_SEL.startButtons) {
@@ -1492,7 +1526,14 @@
     if (folder && safeClick(folder)) return true;
 
     const browseButton = queryVisible('#section-browse-dropdown-button');
-    return !!(browseButton && safeClick(browseButton));
+    if (browseButton && safeClick(browseButton)) return true;
+    // On a starter/game page none of the above exists; browser Back lands in the
+    // folder view there (verified live, same as hunterReopenList).
+    if (/\/(game|list-starter)/i.test(window.location.pathname) && window.history.length > 1) {
+      window.history.back();
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -1598,6 +1639,7 @@
     hunterNavigationReadyAt  = 0;
     hunterListPlayed         = false;
     hunterListStage          = 'reading';   // every list starts with Reading
+    hunterModeRuns           = { reading: 0, writing: 0 };
   }
 
   /** One navigation step per tick. After each click wait for EP to re-render
@@ -1629,13 +1671,38 @@
   }
 
   // ── Skip whole list shares the exact same folder/list/mode/start driver. ──
+  /** Skip list: the list being hunted is flagged `skipped` in ep.scout (removed
+   *  from the panel, the counts and the next-list choice; a re-scout keeps the
+   *  flag), then Hunter opens the next undone list. Without scouted data it falls
+   *  back to the sibling-list walk. */
   function skipToNextTask() {
     if (!hunterEnabled || !CFG.hunter.enabled) {
       showToast('🕵️ Enable Hunter mode before skipping a list');
       return;
     }
-    beginHunterNavigation();
-    showToast('⏭ Finding next available list…');
+    if (!scoutCurrent) scoutAdoptCurrent();
+    const cur = scoutCurrent;
+    // A pending finish / stage switch must not fire after the skip.
+    clearHunterDelayedTimers();
+    hunterListSleepScheduled = false;
+    if (!cur) {
+      beginHunterNavigation();
+      showToast('⏭ Finding next available list…');
+      return;
+    }
+    scoutMarkSkipped(cur);
+    const next = scoutNextAfter(cur);
+    hunterListStage = 'reading';
+    hunterModeRuns  = { reading: 0, writing: 0 };
+    hunterResetListRun();
+    scoutSetCurrent(null);
+    if (next) {
+      showToast('⏭ Skipped “' + cur.title.slice(0, 24) + '” · opening next list…');
+      scoutLaunch(next);
+    } else {
+      showToast('⏭ Skipped · no more scouted lists — Hunter stopped');
+      stopHunter();
+    }
   }
 
   // ── Scout Mode: crawl a subject's content tree → ep.scout → launch lists ──
@@ -1683,6 +1750,9 @@
 
   /** Only vocabulary lists are queued; unknown kinds (older scans) stay visible. */
   function scoutIsVocab(l) { return !l.kind || /translation list|vocab/i.test(l.kind); }
+
+  /** Lists Hunter may still complete: vocabulary lists the user did not skip. */
+  function scoutIsPossible(l) { return scoutIsVocab(l) && !l.skipped; }
 
   /** Remember the launched list (also across a page reload) or clear it. */
   function scoutSetCurrent(t) {
@@ -1813,7 +1883,7 @@
           if (!(await scoutRunLang(slug))) complete = false;
         }
       } else showToast('🔭 Could not open the Library');
-      const open = Object.values(scoutLoad()).reduce((n, s) => n + Object.values(s.lists).filter(l => !l.done && scoutIsVocab(l)).length, 0);
+      const open = Object.values(scoutLoad()).reduce((n, s) => n + Object.values(s.lists).filter(l => !l.done && scoutIsPossible(l)).length, 0);
       showToast(complete ? '🔭 Scout done · ' + open + ' undone lists'
                          : '🔭 Scout paused (' + (scoutCancel ? 'stopped' : 'cap') + ') · ' + open + ' undone — press Scout to continue');
     } catch (e) {
@@ -1839,6 +1909,7 @@
     const l = scoutRows().find(x => !x.folder && x.title === target.title);
     if (!l || !safeClick(l.row)) { showToast('🔭 List “' + target.title + '” not found'); return false; }
     hunterListStage = target.stage === 'writing' ? 'writing' : 'reading';
+    if (!target.stage) hunterModeRuns = { reading: 0, writing: 0 };   // a new list; a reopen keeps its run counts
     hunterResetListRun();   // a new list starts clean (played flag of the previous list would block the start gate)
     scoutSetCurrent({ lang: target.lang, path: target.path, title: target.title, played: false });
     showToast('🔭 Launching ' + target.title);
@@ -1990,25 +2061,28 @@
     } catch (e) {}
   }
 
-  function scoutMarkDone(t) {
+  /** Apply `patch` to the list and to the same list scanned under another
+   *  parent folder (same title + folder id), save, refresh the panel. */
+  function scoutFlag(t, patch) {
     const all = scoutLoad();
     const lists = all[t.lang] && all[t.lang].lists;
     const e = lists && lists[t.path.concat(t.title).join(' › ')];
     if (e) {
-      // Same list scanned under another parent folder: mark those done too.
       Object.values(lists).forEach(l => {
-        if (l.title === e.title && l.folderId === e.folderId) { l.done = true; l.progress = 100; }
+        if (l.title === e.title && l.folderId === e.folderId) Object.assign(l, patch);
       });
       scoutSave(all);
     }
     renderScoutList();
   }
+  function scoutMarkDone(t)    { scoutFlag(t, { done: true, progress: 100 }); }
+  function scoutMarkSkipped(t) { scoutFlag(t, { skipped: true }); }
 
   /** Next undone scouted list after `t` in the same language (scan order). */
   function scoutNextAfter(t) {
     const all = scoutLoad(), store = all[t.lang];
     if (!store) return null;
-    const nk = pickNextKey(store.lists, t.path.concat(t.title).join(' › '), scoutIsVocab);
+    const nk = pickNextKey(store.lists, t.path.concat(t.title).join(' › '), scoutIsPossible);
     return nk ? { lang: t.lang, path: store.lists[nk].folderPath, title: store.lists[nk].title } : null;
   }
 
@@ -2019,7 +2093,7 @@
     box.textContent = '';
     const all = scoutLoad();
     for (const lang of Object.keys(all).sort()) {
-      const undone = Object.values(all[lang].lists || {}).filter(l => !l.done && scoutIsVocab(l));
+      const undone = Object.values(all[lang].lists || {}).filter(l => !l.done && scoutIsPossible(l));
       const group = document.createElement('details');
       const sum = document.createElement('summary');
       sum.textContent = lang + ' (' + undone.length + ' undone)';
@@ -2118,6 +2192,7 @@
     hunterQuestion = ''; lastFilled = ''; hunterVerdictHandledKey = ''; hunterAdvancing = false;
     scoutNoQuestionSince = 0; scoutStarterTicks = 0; scoutGameIds = '';
     hunterStartWaitSince = 0; hunterStartRetriggered = false; hunterStartTimedOut = false; hunterModeTries = 0;
+    hunterDecisionKey = '';
     hunterSetState('IDLE');
   }
 
@@ -2137,35 +2212,41 @@
     return !!(row && safeClick(row.row));
   }
 
-  /** The current mode run is over (finished, or already 100% on the starter):
-   *  Reading → Writing; Writing → the list is complete (Reading + Writing),
-   *  it is marked done in ep.scout and Hunter moves on to the next list. */
-  function hunterStageDone(rule) {
+  /** A mode run is over (finished). Count it, get back to the list's starter and
+   *  let hunterStartWhenReady() read what is left there: a mode that is not 100%
+   *  runs (again), and only when Reading and Writing are both learnt is the
+   *  list complete (hunterListComplete). */
+  function hunterStageDone() {
     if (hunterListSleepScheduled) return;
     hunterListSleepScheduled = true;
     const finished = scoutCurrent;
-    const next = nextStage(hunterListStage);
-    if (rule === undefined) scoutLogFinish(scoutFinishRule || 'detectListDone');
+    const ran = hunterListStage;
+    hunterModeRuns[ran]++;
+    scoutLogFinish(scoutFinishRule || 'detectListDone');
     scoutFinishRule = '';
     const sleepMs = clampMs(CFG.hunter.betweenListDelay, CFG.hunter.safeMinDelayMs, CFG.hunter.safeMaxDelayMs);
+    showToast((ran === 'writing' ? '✍️ Writing' : '📖 Reading') + ' run finished · checking what is left in ' +
+              (sleepMs / 1000).toFixed(1) + 's…');
+    hunterDefer(() => {
+      hunterListSleepScheduled = false;
+      hunterResetListRun();
+      if (/\/list-starter/i.test(window.location.pathname)) return; // start gate reads the modes
+      hunterReopenList().then(ok => {
+        if (ok || !hunterEnabled) return;
+        if (finished) scoutLaunch({ lang: finished.lang, path: finished.path, title: finished.title, stage: ran });
+        else { showToast('⚠️ Could not reopen the list — moving on'); beginHunterNavigation(); }
+      });
+    }, sleepMs);
+  }
+
+  /** Reading and Writing are both learnt: mark the list done in ep.scout (it
+   *  leaves the panel until a re-scout) and move on to the next undone list. */
+  function hunterListComplete() {
+    if (hunterListSleepScheduled) return;
+    hunterListSleepScheduled = true;
+    const finished = scoutCurrent;
+    const sleepMs = clampMs(CFG.hunter.betweenListDelay, CFG.hunter.safeMinDelayMs, CFG.hunter.safeMaxDelayMs);
     const secs = (sleepMs / 1000).toFixed(1);
-
-    if (next) {
-      showToast('📖 Reading done · ✍️ Writing in ' + secs + 's…');
-      hunterDefer(() => {
-        hunterListSleepScheduled = false;
-        hunterSetStage(next);
-        hunterResetListRun();
-        if (/\/list-starter/i.test(window.location.pathname)) return; // start gate takes over
-        hunterReopenList().then(ok => {
-          if (ok || !hunterEnabled) return;
-          if (finished) scoutLaunch({ lang: finished.lang, path: finished.path, title: finished.title, stage: next });
-          else { showToast('⚠️ Could not reopen the list — moving on'); beginHunterNavigation(); }
-        });
-      }, sleepMs);
-      return;
-    }
-
     if (finished) scoutMarkDone(finished);
     showToast('🏁 List complete (Reading + Writing) · 💤 next list in ' + secs + 's…');
     hunterDefer(() => {
@@ -2212,18 +2293,33 @@
       return;
     }
 
-    const mode = hunterListStage === 'writing' ? 'writing' : 'reading';
-    const pick = hunterPickMode(mode);
-    if (pick && hunterModeLearnt(pick)) {            // this mode is already 100%
-      console.log('[Hunter] ' + mode + ' already 100% — skipping');
-      hunterStageDone('skip');
+    // What is left? Read the starter's per-mode progress: Reading first, then
+    // Writing; a mode that is not 100% (also one that just ran) is run (again).
+    const readingItem = hunterPickMode('reading'), writingItem = hunterPickMode('writing');
+    const capped = m => hunterModeRuns[m] >= CFG.hunter.maxModeRuns;
+    const status = (item, m) => { const s = hunterModeStatus(item); return s === 'open' && capped(m) ? 'learnt' : s; };
+    const rs = status(readingItem, 'reading'), ws = status(writingItem, 'writing');
+    if (rs === 'absent' && ws === 'absent' && waited <= CFG.hunter.startWaitMs) return;   // mode items not rendered yet
+    let mode = remainingMode(rs, ws);
+    if (mode === undefined) {
+      // No readable per-mode progress on this starter: fall back to the stage
+      // order (Reading → Writing → complete), one run per mode.
+      mode = hunterListStage === 'writing' ? 'writing' : 'reading';
+      while (mode && hunterModeRuns[mode] > 0) mode = nextStage(mode);
+    }
+    // The reading must hold still for modeSettleMs before it is trusted (the
+    // progress can lag behind a run that just ended).
+    const decision = mode + '|' + rs + ',' + ws;
+    if (decision !== hunterDecisionKey) { hunterDecisionKey = decision; hunterDecisionSince = now; return; }
+    if (now - hunterDecisionSince < CFG.hunter.modeSettleMs) return;
+    if (mode === null) {
+      if (capped('reading') || capped('writing')) console.warn('[Hunter] mode run cap reached — treating the list as complete');
+      console.log('[Hunter] Reading + Writing both done');
+      hunterListComplete();
       return;
     }
-    if (!pick && mode === 'writing' && queryAllVisible(NAV_SEL.modeItems).length > 0) {
-      console.log('[Hunter] no Writing mode on this list — skipping');
-      hunterStageDone('skip');
-      return;
-    }
+    if (mode !== hunterListStage) hunterSetStage(mode);
+    const pick = mode === 'writing' ? writingItem : readingItem;
     if (pick && !pick.classList.contains('selected')) {
       if (++hunterModeTries > 8) {
         if (!hunterStartTimedOut) { hunterStartTimedOut = true; showToast('⚠️ Could not select ' + mode + ' mode'); }
@@ -2235,7 +2331,7 @@
     }
     if (clickHunterStartButton()) {
       console.log('[Hunter] Start (' + mode + ') after vocab loaded in ' + waited + ' ms');
-      hunterStartWaitSince = 0; hunterModeTries = 0;
+      hunterStartWaitSince = 0; hunterModeTries = 0; hunterDecisionKey = '';
     }
   }
 
