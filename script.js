@@ -79,6 +79,11 @@
       // to try before giving up.
       navigationSettleMs : 1200,
       maxNavigationAttempts: 120,
+      // Start gate: Start is only clicked once the vocab grid was read. After
+      // startRetriggerMs without vocab the loader is triggered again; after
+      // startWaitMs a "vocab did not load" toast is shown (still no Start).
+      startRetriggerMs   : 4000,
+      startWaitMs        : 20000,
       // ── Phase 3 additions ──
       maxAdvanceAttempts : 5,
       stuckStateMs       : 30000,
@@ -238,6 +243,26 @@
     return ms;
   }
 
+  // PURE-LOGIC-BEGIN (no DOM / storage access; unit-tested in Node)
+  /** Stage that follows `stage`: Reading → Writing; null = both modes done. */
+  function nextStage(stage) { return stage === 'reading' ? 'writing' : null; }
+
+  /** Start gate on a list-starter: 'ready' once the vocab was read from the
+   *  grid, else 'wait' (or 'timeout' after `timeoutMs`; still no Start). */
+  function startGate(onStarter, vocabReady, waitedMs, timeoutMs) {
+    if (!onStarter) return 'wait';
+    if (vocabReady) return 'ready';
+    return waitedMs > timeoutMs ? 'timeout' : 'wait';
+  }
+
+  /** Key of the next undone list after `key` in scan order (wraps), or null. */
+  function pickNextKey(lists, key, isVocab) {
+    const keys = Object.keys(lists), i = keys.indexOf(key);
+    const rest = keys.slice(i + 1).concat(keys.slice(0, Math.max(i, 0)));
+    return rest.find(k => !lists[k].done && isVocab(lists[k]) && k !== key) || null;
+  }
+  // PURE-LOGIC-END
+
   /** waitFor: polls the selector until visible or timeout. Resolves with
    *  the element or null. Caller decides what to do with null. */
   function waitFor(selector, timeoutMs, intervalMs) {
@@ -294,6 +319,11 @@
   let hunterAdvanceReadyAt     = 0;
   let hunterListSleepScheduled = false;
   let hunterListPlayed         = false;   // a question of the current list was seen
+  let hunterListStage          = 'reading'; // 'reading' → 'writing' → list complete (see nextStage)
+  let hunterStartWaitSince     = 0;       // start gate: when waiting for the vocab began
+  let hunterStartRetriggered   = false;   // start gate: loader re-triggered once
+  let hunterStartTimedOut      = false;   // start gate: timeout toast shown once
+  let hunterModeTries          = 0;       // start gate: mode-item clicks for this start
   let hunterSyntheticInput     = false;
   let hunterTypingTransitionScheduled = false;
   let hunterVerdictHandledKey  = '';
@@ -408,7 +438,7 @@
     setTimeout(() => {
       document.querySelector('#slim-scroll-content .preview-grid')?.lastElementChild?.scrollIntoView({ block: 'end' });
       setTimeout(() => { loadAnswers(); }, 1000);
-      document.getElementsByClassName("main-text ng-binding infinity")[0].click();
+      document.getElementsByClassName("main-text ng-binding infinity")[0]?.click();
     }, 500);
   }
 
@@ -444,7 +474,8 @@
     updatePanel(count);
     showToast(count > 0 ? `✅ ${count} pairs loaded` : `⚠️ No vocab found`);
     console.log('[EP] Loaded', count, 'pairs');
-    if (count > 0) document.getElementById("start-button-main-label")?.click();
+    // With Hunter on, hunterStartWhenReady() picks the mode and clicks Start.
+    if (count > 0 && !hunterEnabled) document.getElementById("start-button-main-label")?.click();
     return count;
   }
 
@@ -1109,7 +1140,6 @@
       '.information-controls button',
       '#sa-navigation-controls button',
       '.sa-navigation-controls button',
-      '.nav-bar-exit',
       '.game-action-bar button',
       '.cheer-button',
     ];
@@ -1398,15 +1428,28 @@
     return /english\s+text\s+to\s+french/.test(text);
   }
 
-  /** Select Writing and preserve the current translation direction when available. */
-  function selectHunterWritingMode() {
-    const modes = queryAllVisible(NAV_SEL.modeItems)
-      .filter(mode => navText(mode.querySelector('.main-text')).toLowerCase() === 'writing');
-    if (modes.length === 0) return false;
+  /** Visible starter mode items (`li.item`) whose `.main-text` is `name`
+   *  ('reading' / 'writing'). */
+  function hunterModeItems(name) {
+    return queryAllVisible(NAV_SEL.modeItems)
+      .filter(mode => navText(mode.querySelector('.main-text')).toLowerCase() === name);
+  }
+
+  /** The item to select for `name`; Writing preserves the translation direction. */
+  function hunterPickMode(name) {
+    const modes = hunterModeItems(name);
+    if (modes.length === 0) return null;
+    if (name !== 'writing') return modes[0];
     const direction = preferredHunterDirection();
-    const selected = modes.find(mode => modeMatchesDirection(mode, direction)) || modes[0];
-    if (selected.classList.contains('selected')) return true;
-    return safeClick(selected);
+    return modes.find(mode => modeMatchesDirection(mode, direction)) || modes[0];
+  }
+
+  /** A mode item shows its own progress (`.percentage-label`, class `learnt`
+   *  at 100%; verified live on a French list-starter). */
+  function hunterModeLearnt(item) {
+    const label = item && item.querySelector('.percentage-label');
+    return !!(label && isVisible(label) &&
+      (label.classList.contains('learnt') || parseInt(navText(label), 10) >= 100));
   }
 
   /** Reuse the existing EP start controls, including the modern preview header button. */
@@ -1429,7 +1472,6 @@
       '.navigation-controls .back-button',
       'button[aria-label="Back"]',
       'button[aria-label*="back" i]',
-      '.nav-bar-exit',
       '#exit-button',
       '.back-button',
       '[data-action="back"]',
@@ -1487,19 +1529,16 @@
       return 'waiting';
     }
 
-    // Once a new list is opened, choose Writing before reusing the existing
-    // Start button. This branch also works on legacy and modern hybrid starters.
+    // A new list's starter is on screen. Hand over to the idle auto-start
+    // (hunterStartWhenReady): it waits for the vocab, selects Reading first
+    // and clicks Start. Never start from here: the vocab is not read yet.
     if (hunterNavigationStage !== 'folder' && queryAllVisible(NAV_SEL.modeItems).some(mode =>
-        navText(mode.querySelector('.main-text')).toLowerCase() === 'writing')) {
-      if (!selectHunterWritingMode()) return 'waiting';
-      hunterNavigationStage = 'start';
-      if (clickHunterStartButton()) {
-        hunterNavigationPending = false;
-        hunterNavigationStage = 'idle';
-        hunterNavigationAttempts = 0;
-        return 'moved';
-      }
-      return 'waiting';
+        /^(reading|writing)$/.test(navText(mode.querySelector('.main-text')).toLowerCase()))) {
+      hunterListStage = 'reading';
+      hunterNavigationPending = false;
+      hunterNavigationStage = 'idle';
+      hunterNavigationAttempts = 0;
+      return 'moved';
     }
 
     const next = findNextList();
@@ -1558,6 +1597,7 @@
     hunterNavigationAttempts = 0;
     hunterNavigationReadyAt  = 0;
     hunterListPlayed         = false;
+    hunterListStage          = 'reading';   // every list starts with Reading
   }
 
   /** One navigation step per tick. After each click wait for EP to re-render
@@ -1577,7 +1617,7 @@
     } else if (result === 'moved') {
       hunterNavigationReadyAt = Date.now() + CFG.hunter.navigationSettleMs;
       if (!hunterNavigationPending) {
-        // The new list's Start button was clicked; resume normal hunting.
+        // The new list's starter is open; hunterStartWhenReady() takes over.
         hunterListSleepScheduled = false;
         hunterQuestion  = '';
         lastFilled      = '';
@@ -1651,7 +1691,8 @@
     }
     scoutCurrent = t;
     try {
-      if (t) localStorage.setItem(SCOUT_CURRENT_KEY, JSON.stringify(t));
+      // `stage` (reading/writing) is persisted so a reload resumes the right mode.
+      if (t) localStorage.setItem(SCOUT_CURRENT_KEY, JSON.stringify(Object.assign({}, t, { stage: hunterListStage })));
       else localStorage.removeItem(SCOUT_CURRENT_KEY);
     } catch (e) {}
   }
@@ -1797,17 +1838,34 @@
     }
     const l = scoutRows().find(x => !x.folder && x.title === target.title);
     if (!l || !safeClick(l.row)) { showToast('🔭 List “' + target.title + '” not found'); return false; }
+    hunterListStage = target.stage === 'writing' ? 'writing' : 'reading';
+    hunterResetListRun();   // a new list starts clean (played flag of the previous list would block the start gate)
     scoutSetCurrent({ lang: target.lang, path: target.path, title: target.title, played: false });
     showToast('🔭 Launching ' + target.title);
     if (!hunterEnabled) startHunter();
     return true;
   }
 
-  /** Open a scouted list; a different language needs a full load first. */
+  /** Open a scouted list. On a task page of the same language, Back lands in
+   *  the folder view (verified live: EP replaces the starter history entry with
+   *  the game), so replay from there; otherwise do a full load of the content
+   *  root and finish the launch in scoutResumePending(). */
   function scoutLaunch(target) {
     if (scoutLang() === target.lang) return scoutReplay(target);
-    try { localStorage.setItem(SCOUT_PENDING_KEY, JSON.stringify(target)); } catch (e) {}
-    window.location.assign('/app/dashboard/' + encodeURIComponent(target.lang) + '/content/');
+    const task = window.location.pathname.match(/^\/app\/([^/]+)\/\d+\/\d+\/(game|list-starter)/i);
+    const fullLoad = () => {
+      console.log('[Scout] launch via full page load');
+      try { localStorage.setItem(SCOUT_PENDING_KEY, JSON.stringify(target)); } catch (e) {}
+      window.location.assign('/app/dashboard/' + encodeURIComponent(target.lang) + '/content/');
+    };
+    if (!task || decodeURIComponent(task[1]).toLowerCase() !== target.lang) return fullLoad();
+    const before = window.location.href;
+    console.log('[Scout] launch via history.back from a task page');
+    window.history.back();
+    return scoutSettle(before).then(() => {
+      console.log('[Scout] after back: lang=' + scoutLang());
+      return scoutLang() === target.lang ? scoutReplay(target) : fullLoad();
+    });
   }
 
   /** After a full page load: finish a launch that was waiting for it. */
@@ -1828,6 +1886,7 @@
     try { t = JSON.parse(localStorage.getItem(SCOUT_CURRENT_KEY) || 'null'); } catch (e) {}
     if (!t || !t.lang || !Array.isArray(t.path) || !t.title) return;
     scoutCurrent = t;
+    hunterListStage = t.stage === 'writing' ? 'writing' : 'reading';
     if (!hunterEnabled) startHunter();
   }
 
@@ -1914,6 +1973,13 @@
         at: new Date().toISOString(),
         path: window.location.pathname,
         rule,
+        stage: hunterListStage,
+        // Per-mode progress on a starter page (e.g. "Reading 100% learnt").
+        modes: queryAllVisible(NAV_SEL.modeItems).map(m => ({
+          m: navText(m.querySelector('.main-text')).slice(0, 12),
+          p: navText(m.querySelector('.percentage-label')).slice(0, 5),
+          learnt: hunterModeLearnt(m),
+        })).filter(x => x.p).slice(0, 8),
         buttons: queryAllVisible('button').filter(b => !b.closest('#ep-panel'))
                    .map(b => navText(b).slice(0, 30)).filter(Boolean).slice(0, 12),
         dialog: dialog ? navText(dialog).slice(0, 200) : '',
@@ -1942,10 +2008,7 @@
   function scoutNextAfter(t) {
     const all = scoutLoad(), store = all[t.lang];
     if (!store) return null;
-    const key = t.path.concat(t.title).join(' › ');
-    const keys = Object.keys(store.lists);
-    const rest = keys.slice(keys.indexOf(key) + 1).concat(keys.slice(0, Math.max(keys.indexOf(key), 0)));
-    const nk = rest.find(k => !store.lists[k].done && scoutIsVocab(store.lists[k]) && k !== key);
+    const nk = pickNextKey(store.lists, t.path.concat(t.title).join(' › '), scoutIsVocab);
     return nk ? { lang: t.lang, path: store.lists[nk].folderPath, title: store.lists[nk].title } : null;
   }
 
@@ -2040,6 +2103,142 @@
     }
   }
 
+  // ── Per-list pipeline: Reading → Writing → list complete → next list ────────
+
+  /** Change the stage and persist it (scouted lists keep it in ep.scout.current). */
+  function hunterSetStage(stage) {
+    hunterListStage = stage;
+    if (scoutCurrent) scoutSetCurrent(scoutCurrent);
+  }
+
+  /** Forget everything about the run that just ended; the next one starts clean. */
+  function hunterResetListRun() {
+    hunterListPlayed = false;
+    if (scoutCurrent) { scoutCurrent.played = false; scoutSetCurrent(scoutCurrent); }
+    hunterQuestion = ''; lastFilled = ''; hunterVerdictHandledKey = ''; hunterAdvancing = false;
+    scoutNoQuestionSince = 0; scoutStarterTicks = 0; scoutGameIds = '';
+    hunterStartWaitSince = 0; hunterStartRetriggered = false; hunterStartTimedOut = false; hunterModeTries = 0;
+    hunterSetState('IDLE');
+  }
+
+  /** From a finished game back to the list's starter: Back lands in the folder
+   *  view (verified live), then the list row opens the starter again (SPA, no
+   *  reload). Resolves false when the row can't be found. */
+  async function hunterReopenList() {
+    const title = (scoutCurrent && scoutCurrent.title) || scoutLastRowTitle;
+    if (!title) return false;
+    if (/\/(game|list-starter)/i.test(window.location.pathname)) {
+      const before = window.location.href;
+      window.history.back();
+      await scoutSettle(before);
+    }
+    if (!hunterEnabled) return false;
+    const row = scoutRows().find(x => !x.folder && x.title === title);
+    return !!(row && safeClick(row.row));
+  }
+
+  /** The current mode run is over (finished, or already 100% on the starter):
+   *  Reading → Writing; Writing → the list is complete (Reading + Writing),
+   *  it is marked done in ep.scout and Hunter moves on to the next list. */
+  function hunterStageDone(rule) {
+    if (hunterListSleepScheduled) return;
+    hunterListSleepScheduled = true;
+    const finished = scoutCurrent;
+    const next = nextStage(hunterListStage);
+    if (rule === undefined) scoutLogFinish(scoutFinishRule || 'detectListDone');
+    scoutFinishRule = '';
+    const sleepMs = clampMs(CFG.hunter.betweenListDelay, CFG.hunter.safeMinDelayMs, CFG.hunter.safeMaxDelayMs);
+    const secs = (sleepMs / 1000).toFixed(1);
+
+    if (next) {
+      showToast('📖 Reading done · ✍️ Writing in ' + secs + 's…');
+      hunterDefer(() => {
+        hunterListSleepScheduled = false;
+        hunterSetStage(next);
+        hunterResetListRun();
+        if (/\/list-starter/i.test(window.location.pathname)) return; // start gate takes over
+        hunterReopenList().then(ok => {
+          if (ok || !hunterEnabled) return;
+          if (finished) scoutLaunch({ lang: finished.lang, path: finished.path, title: finished.title, stage: next });
+          else { showToast('⚠️ Could not reopen the list — moving on'); beginHunterNavigation(); }
+        });
+      }, sleepMs);
+      return;
+    }
+
+    if (finished) scoutMarkDone(finished);
+    showToast('🏁 List complete (Reading + Writing) · 💤 next list in ' + secs + 's…');
+    hunterDefer(() => {
+      hunterListSleepScheduled = false;
+      hunterSetStage('reading');
+      hunterResetListRun();
+      if (finished) {
+        const nextList = scoutNextAfter(finished);
+        scoutSetCurrent(null);
+        if (nextList) scoutLaunch(nextList);
+        else { showToast('🏁 No more scouted lists — Hunter stopped'); stopHunter(); }
+      } else if (CFG.hunter.autoContinueLists) {
+        if (hunterEnabled) beginHunterNavigation();
+      } else {
+        showToast('🏁 List complete — Hunter stopped');
+        stopHunter();
+      }
+    }, sleepMs);
+  }
+
+  /** Idle auto-start on a list-starter, vocab-gated: never selects a mode or
+   *  clicks Start before the vocab grid was read (`vocabFromGrid`; learned pairs
+   *  hydrated by startHunter() don't count). Runs once per tick; STOP and page
+   *  changes cancel it by stopping the tick / resetting the wait. */
+  function hunterStartWhenReady() {
+    if (hunterListPlayed || hunterListSleepScheduled) return;   // finish check / stage switch pending
+    if (scoutCurrent && scoutCurrent.played) return;
+    const now = Date.now();
+    if (!hunterStartWaitSince) hunterStartWaitSince = now;
+    const waited = now - hunterStartWaitSince;
+    const ready = vocabFromGrid && !!document.querySelector(SEL.targetLang);
+    const gate = startGate(true, ready, waited, CFG.hunter.startWaitMs);
+    if (gate !== 'ready') {
+      setDebug('⏳ Waiting for vocab…');
+      if (!hunterStartRetriggered && waited > CFG.hunter.startRetriggerMs) {
+        hunterStartRetriggered = true;
+        console.log('[Hunter] Vocab not read yet — loading again');
+        fullList();
+      }
+      if (gate === 'timeout' && !hunterStartTimedOut) {
+        hunterStartTimedOut = true;
+        showToast('⚠️ Vocab did not load — not starting this list');
+      }
+      return;
+    }
+
+    const mode = hunterListStage === 'writing' ? 'writing' : 'reading';
+    const pick = hunterPickMode(mode);
+    if (pick && hunterModeLearnt(pick)) {            // this mode is already 100%
+      console.log('[Hunter] ' + mode + ' already 100% — skipping');
+      hunterStageDone('skip');
+      return;
+    }
+    if (!pick && mode === 'writing' && queryAllVisible(NAV_SEL.modeItems).length > 0) {
+      console.log('[Hunter] no Writing mode on this list — skipping');
+      hunterStageDone('skip');
+      return;
+    }
+    if (pick && !pick.classList.contains('selected')) {
+      if (++hunterModeTries > 8) {
+        if (!hunterStartTimedOut) { hunterStartTimedOut = true; showToast('⚠️ Could not select ' + mode + ' mode'); }
+        return;
+      }
+      console.log('[Hunter] Selecting ' + mode + ' mode');
+      safeClick(pick);                                // verified `selected` on the next tick
+      return;
+    }
+    if (clickHunterStartButton()) {
+      console.log('[Hunter] Start (' + mode + ') after vocab loaded in ' + waited + ' ms');
+      hunterStartWaitSince = 0; hunterModeTries = 0;
+    }
+  }
+
   function hunterTick() {
     if (!hunterEnabled || !CFG.hunter.enabled || pageChanging) return;
 
@@ -2081,9 +2280,9 @@
     // uses the played-list rules; otherwise the generic detector, which only
     // counts once a question was seen (an unplayed list's starter screen also
     // reads Continue/Restart).
-    const finishedNow = scoutCurrent
-      ? scoutCurrent.played && (detectScoutFinished() || (url.includes('game') && detectListDone()))
-      : hunterListPlayed && detectListDone();
+    const played = scoutCurrent ? scoutCurrent.played : hunterListPlayed;
+    const finishedNow = played && (detectScoutFinished() ||
+      (scoutCurrent ? url.includes('game') && detectListDone() : detectListDone()));
     if (finishedNow &&
         hunterState !== 'LIST_DONE' &&
         hunterState !== 'ADVANCE') {
@@ -2253,7 +2452,7 @@
             // Try again to click start buttons after many failures.
             if (hunterNoAdvance >= 5) {
               if (CFG.hunter.autoStart) {
-                if (url.includes('list-starter') && vocabUnlocked) {
+                if (url.includes('list-starter') && vocabUnlocked && vocabFromGrid) {
                   const sm = queryVisible('#start-button-main');
                   if (sm) safeClick(sm);
                 } else if (url.includes('activity-starter')) {
@@ -2270,54 +2469,10 @@
 
       case 'LIST_DONE': {
         console.log('[Hunter] List / task complete.');
-
-        // A list launched from the Scout panel: mark it done and move the user
-        // on to the next undone scouted list.
-        if (scoutCurrent) {
-          // The starter screen of a freshly launched list also looks "done"
-          // (Continue/Restart label). Only a list whose questions were seen is finished.
-          if (!scoutCurrent.played) { hunterSetState('IDLE'); break; }
-          if (hunterListSleepScheduled) return;
-          hunterListSleepScheduled = true;
-          const finished = scoutCurrent;
-          scoutLogFinish(scoutFinishRule || 'detectListDone');
-          scoutFinishRule = '';
-          scoutMarkDone(finished);
-          const sleepMs = clampMs(CFG.hunter.betweenListDelay,
-                                  CFG.hunter.safeMinDelayMs,
-                                  CFG.hunter.safeMaxDelayMs);
-          showToast('🏁 List complete · 💤 next scouted list in ' + (sleepMs / 1000).toFixed(1) + 's…');
-          hunterDefer(() => {
-            hunterListSleepScheduled = false;
-            hunterSetState('IDLE');
-            hunterQuestion = '';
-            lastFilled     = '';
-            const next = scoutNextAfter(finished);
-            scoutSetCurrent(null);
-            if (next) scoutLaunch(next);
-            else { showToast('🏁 No more scouted lists — Hunter stopped'); stopHunter(); }
-          }, sleepMs);
-          return;
-        }
-
-        if (CFG.hunter.autoContinueLists) {
-          // LIST_DONE is polled every 500 ms. Guard both the toast and the
-          // sleep so repeated ticks cannot spam the user or queue navigation.
-          if (hunterListSleepScheduled) return;
-          hunterListSleepScheduled = true;
-          const sleepMs = clampMs(CFG.hunter.betweenListDelay,
-                                  CFG.hunter.safeMinDelayMs,
-                                  CFG.hunter.safeMaxDelayMs);
-          const sleepSeconds = (sleepMs / 1000).toFixed(sleepMs % 1000 ? 1 : 0);
-          showToast('🏁 List complete · 💤 next list in ' + sleepSeconds + 's…');
-          hunterDefer(() => {
-            if (!hunterEnabled) return;
-            beginHunterNavigation();
-          }, sleepMs);
-          return;
-        }
-        showToast('🏁 List complete — Hunter stopped');
-        stopHunter();
+        // Only a run whose questions were seen is finished (a starter screen
+        // also reads Continue/Restart). Reading → Writing → next list.
+        if (!(scoutCurrent ? scoutCurrent.played : hunterListPlayed)) { hunterSetState('IDLE'); break; }
+        hunterStageDone();
         return;
       }
     }
@@ -2325,17 +2480,14 @@
     // Idle auto-start: keep Hunter busy by clicking start buttons on the
     // right page.
     if (CFG.hunter.autoStart && hunterState === 'IDLE') {
-      // Only start once the vocab is loaded; Start before that opens a game
-      // the assistant has no answers for.
-      // A played, tracked list that returned to its starter is waiting for the
-      // finish check; restarting it here would undo it.
-      if (url.includes('list-starter') && vocabUnlocked && vocabFromGrid &&
-          !(scoutCurrent && scoutCurrent.played)) {
-        const startMain = queryVisible('#start-button-main');
-        if (startMain) safeClick(startMain);
-      } else if (url.includes('activity-starter')) {
-        const startSchool = queryVisible('#start-button-school');
-        if (startSchool) safeClick(startSchool);
+      if (url.includes('list-starter') && vocabUnlocked) {
+        hunterStartWhenReady();   // vocab-gated; picks Reading/Writing, then Start
+      } else {
+        hunterStartWaitSince = 0;
+        if (url.includes('activity-starter')) {
+          const startSchool = queryVisible('#start-button-school');
+          if (startSchool) safeClick(startSchool);
+        }
       }
     }
     } catch (e) {
@@ -2455,6 +2607,10 @@
     hunterQuestionTimes     = [];
     hunterQuestionStartMs   = 0;
     hunterVerdictHandledKey = '';
+    hunterStartWaitSince    = 0;
+    hunterStartRetriggered  = false;
+    hunterStartTimedOut     = false;
+    hunterModeTries         = 0;
     resetHunterNavigation();
     if (hunterHumanTimer) {
       clearTimeout(hunterHumanTimer);
@@ -2518,6 +2674,8 @@
     resetHunterNavigation();
     hunterEnabled          = false;
     hunterAdvancing        = false;
+    hunterListStage        = 'reading';   // the next run starts with Reading again
+    hunterStartWaitSince   = 0;
     stopEtaTicker();
     hunterState            = 'IDLE';
     hunterAdvancing        = false;

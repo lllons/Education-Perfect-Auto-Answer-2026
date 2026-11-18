@@ -468,6 +468,10 @@ Status legend: ✅ shipped on `main` · 🟡 Planned — not in current release
 | Auto-continue on by default; hand-started lists adopted from `ep.scout` (`scoutAdoptCurrent`) | **Done — verified live** (French list opened from the content browser, Hunter ON → `ep.scout.current` set) | ✅ yes |
 | Finished-list detection `detectScoutFinished()` (no question/answer box for 4 s on the game page, or back on the same list-starter for 2 ticks) + `ep.finishlog` evidence snapshots | **Code + Node unit tests only** — not seen against a real finished list; read `ep.finishlog` after the user finishes one | ✅ yes |
 | Hunter idle auto-start on list-starter waits for loaded vocab | **Done — verified live** | ✅ yes |
+| Vocab-gated Start (`hunterStartWhenReady`, `startGate`): no mode select / Start before the vocab grid was read; `loadAnswers` no longer starts with Hunter on | **Done — verified live** (French, Chinese; blocked-vocab variant never started; STOP cancels) | ✅ yes |
+| Per-list stages: start on Reading, then Writing (`nextStage`, mode item selected + checked, already-100% mode skipped, stage persisted in `ep.scout.current`) | **Done — verified live up to Start** (Reading and Writing selection and start; skip of a 100% mode) | ✅ yes |
+| Reading finished → Writing; Writing finished → list complete, marked done in `ep.scout` (hidden until re-scouted) → next undone list | **Code + Node unit tests only** — needs a real finished mode; read `ep.finishlog` afterwards | ✅ yes |
+| `scoutLaunch` from a task page via `history.back()` (no reload), `scoutReplay` resets run state | **Done — verified live** (game page → next list starter) | ✅ yes |
 | Multi-step list navigation driven per tick (`driveHunterNavigation`, settle delay + attempt cap); fixes auto-continue treating `'exhausted'`/`'waiting'` as success | **Done in code — not yet verified live** | ✅ yes |
 
 ### Phase 5+ (planned, NOT shipped)
